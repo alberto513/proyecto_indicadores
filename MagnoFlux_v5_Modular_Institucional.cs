@@ -122,6 +122,15 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool smartExitUsed;
         private double maxFavorableTicks;
         private double maxUnfavorableTicks;
+        private int barsHeld;
+        private double tradeDuration;
+        private string entryTimeOnly;
+        private string exitTimeOnly;
+        private int entryBarIndex;
+        private int exitBarIndex;
+        private int entryQty;
+        private int netContractsClosed;
+        private double tradeEfficiency;
 
         protected override void OnStateChange()
         {
@@ -154,7 +163,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     logWriter = null;
                 }
                 if (logWriter != null && logWriter.BaseStream.Length == 0)
-                    logWriter.WriteLine("Time,Direction,Entry,Exit,Type,PNL,Score,Hz,EquityPeak,EquityDrawdown,TP1Hit,TP2Hit,SmartExitUsed,MaxFavorableTicks,MaxUnfavorableTicks");
+                    logWriter.WriteLine("Time,Direction,Entry,Exit,Type,PNL,Score,Hz,EquityPeak,EquityDrawdown,TP1Hit,TP2Hit,SmartExitUsed,MaxFavorableTicks,MaxUnfavorableTicks,BarsHeld,TradeDuration,TP1Price,TP2Price,TPFinalPrice,SLPrice,EntryTimeOnly,ExitTimeOnly,EntryBarIndex,ExitBarIndex,Partial1Qty,Partial2Qty,FinalQty,NetContractsClosed,TradeEfficiency");
             }
             else if (State == State.Terminated)
             {
@@ -253,6 +262,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             entryPrice = Open[0];
             entryBar = CurrentBar;
+            entryBarIndex = CurrentBar;
             if (UseAtrTargets)
             {
                 tpPrice = isLong ? entryPrice + atr[0] * TpMultiplier : entryPrice - atr[0] * TpMultiplier;
@@ -293,6 +303,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             smartExitUsed = false;
             maxFavorableTicks = 0;
             maxUnfavorableTicks = 0;
+            barsHeld = 0;
+            tradeDuration = 0;
+            entryTimeOnly = Time[0].ToString("HH:mm:ss");
+            exitTimeOnly = string.Empty;
+            exitBarIndex = 0;
+            entryQty = currentQty;
+            netContractsClosed = 0;
+            tradeEfficiency = 0;
 
             if (isLong)
                 EnterLong(currentQty, "LongEntry");
@@ -492,8 +510,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                 double acc = 0; try { acc = Account.Get(AccountItem.CashValue, Currency.UsDollar); } catch { }
                 if (acc > equityPeak) equityPeak = acc;
                 equityDrawdown = equityPeak - acc;
+                barsHeld = CurrentBar - entryBar;
+                tradeDuration = (time - entryExecTime).TotalSeconds;
+                exitTimeOnly = time.ToString("HH:mm:ss");
+                exitBarIndex = CurrentBar;
+                netContractsClosed += quantity;
+                tradeEfficiency = (Math.Abs(tpPrice - entryPrice) > 0) ? (maxFavorableTicks / Math.Abs(tpPrice - entryPrice) * 100.0) : 0;
                 string line = $"{entryExecTime:yyyy-MM-dd HH:mm:ss},{(tradeDirection==1?"Long":"Short")},{entryPrice:F2},{price:F2},{execution.Order.Name},{tradePnl:F2},{scoreAtEntry},{currentHz:F4},{equityPeak:F2},{equityDrawdown:F2}";
                 line += $",{tp1Hit},{tp2Hit},{smartExitUsed},{maxFavorableTicks:F2},{maxUnfavorableTicks:F2}";
+                line += $",{barsHeld},{tradeDuration:F0},{tp1Price:F2},{tp2Price:F2},{tpPrice:F2},{slPrice:F2},{entryTimeOnly},{exitTimeOnly},{entryBarIndex},{exitBarIndex},{partial1Qty},{partial2Qty},{finalQty},{entryQty},{tradeEfficiency:F2}";
                 try { logWriter?.WriteLine(line); logWriter?.Flush(); } catch { }
                 dailyPnL += tradePnl;
                 if (acc > equityHigh) equityHigh = acc;
@@ -508,12 +533,19 @@ namespace NinjaTrader.NinjaScript.Strategies
             else
             {
                 tradePnl += tradeDirection * (price - entryPrice) * quantity * (Instrument.MasterInstrument.PointValue == 0 ? 1 : Instrument.MasterInstrument.PointValue);
+                netContractsClosed += quantity;
                 if (execution.Order.Name == "TP1" || execution.Order.Name == "TP2")
                 {
                     double acc = 0; try { acc = Account.Get(AccountItem.CashValue, Currency.UsDollar); } catch { }
                     if (acc > equityPeak) equityPeak = acc;
                     equityDrawdown = equityPeak - acc;
+                    barsHeld = CurrentBar - entryBar;
+                    tradeDuration = (time - entryExecTime).TotalSeconds;
+                    exitTimeOnly = time.ToString("HH:mm:ss");
+                    exitBarIndex = CurrentBar;
+                    tradeEfficiency = (Math.Abs(tpPrice - entryPrice) > 0) ? (maxFavorableTicks / Math.Abs(tpPrice - entryPrice) * 100.0) : 0;
                     string line = $"{entryExecTime:yyyy-MM-dd HH:mm:ss},{(tradeDirection==1?"Long":"Short")},{entryPrice:F2},{price:F2},{execution.Order.Name},{tradePnl:F2},{scoreAtEntry},{currentHz:F4},{equityPeak:F2},{equityDrawdown:F2}";
+                    line += $",{tp1Hit},{tp2Hit},{smartExitUsed},{maxFavorableTicks:F2},{maxUnfavorableTicks:F2},{barsHeld},{tradeDuration:F0},{tp1Price:F2},{tp2Price:F2},{tpPrice:F2},{slPrice:F2},{entryTimeOnly},{exitTimeOnly},{entryBarIndex},{exitBarIndex},{partial1Qty},{partial2Qty},{finalQty},{entryQty},{tradeEfficiency:F2}";
                     try { logWriter?.WriteLine(line); logWriter?.Flush(); } catch { }
                 }
             }
