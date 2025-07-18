@@ -1,0 +1,216 @@
+//────────────────────────────────────────────────────────────────────────────
+//  SuperCompositeArrowPro2_LogReal  –  NinjaTrader 8
+//  • Entrada real:  barra siguiente  →  entryPrice = Open[0]
+//  • TP/SL: ±10 puntos desde CIERRE de la barra de señal (signalPrice)
+//  • Una línea de log por trade, con coma decimal y HH:mm:ss
+//  • Compatible con múltiples señales en paralelo
+//────────────────────────────────────────────────────────────────────────────
+#region Usings
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Windows.Media;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class SuperCompositeArrowPro_LogReal : Indicator
+    {
+        //--------------------------------------------------------------------
+        //  ►  PROPIEDADES EDITABLES
+        //--------------------------------------------------------------------
+        [NinjaScriptProperty] public int    SignalPoints       { get; set; } = 10;  // puntos
+        [NinjaScriptProperty] public int    CooldownBars       { get; set; } = 5;
+        [NinjaScriptProperty] public double MinProb            { get; set; } = 0.75;
+        [NinjaScriptProperty] public double ThresholdVolSpike  { get; set; } = 0.6;
+        [NinjaScriptProperty] public double ThresholdImbalance { get; set; } = 0.6;
+
+        // Pesos regresión logística (puedes afinarlos)
+        [NinjaScriptProperty] public double BetaEMA      { get; set; } = 1.2;
+        [NinjaScriptProperty] public double BetaATR      { get; set; } = 0.8;
+        [NinjaScriptProperty] public double BetaRSI      { get; set; } = 1.1;
+        [NinjaScriptProperty] public double BetaMomentum { get; set; } = 0.9;
+        [NinjaScriptProperty] public double BetaDistEMA  { get; set; } = 1.0;
+
+        //--------------------------------------------------------------------
+        //  ►  INDICADORES INTERNOS
+        //--------------------------------------------------------------------
+        private EMA ema; private RSI rsi; private ATR atr; private SMA volMA;
+
+        //--------------------------------------------------------------------
+        //  ►  LISTA DE SEÑALES ACTIVAS
+        //--------------------------------------------------------------------
+        private readonly List<SignalData> pending = new List<SignalData>();
+        private int barsUntilNextSignal = 0;
+
+        //--------------------------------------------------------------------
+        //  ►  ESTADO
+        //--------------------------------------------------------------------
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = "SuperCompositeArrowPro con log real y preciso.";
+                Name        = "SuperCompositeArrowPro_LogReal";
+                Calculate   = Calculate.OnBarClose;      // una sola vez por barra
+                IsOverlay   = true;
+            }
+            else if (State == State.DataLoaded)
+            {
+                ema   = EMA(21);
+                rsi   = RSI(14,3);
+                atr   = ATR(14);
+                volMA = SMA(Volume,14);
+            }
+        }
+
+        //--------------------------------------------------------------------
+        //  ►  LÓGICA PRINCIPAL
+        //--------------------------------------------------------------------
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 50) return;                 // historial mínimo
+
+            //----------------------------------------------------------------
+            // A)  ACTUALIZAR TODAS LAS SEÑALES PENDIENTES
+            //----------------------------------------------------------------
+            for (int i = pending.Count - 1; i >= 0; i--)
+            {
+                var sig = pending[i];
+
+                // 1) ¿Estamos en la barra de entrada?
+                if (!sig.EntrySet && CurrentBar == sig.SignalBar + 1)
+                {
+                    sig.EntryPrice = Open[0];
+                    // TP / SL medidos desde signalPrice (cierre barra de señal)
+                    sig.TP = sig.IsLong
+                        ? sig.SignalPrice + SignalPoints
+                        : sig.SignalPrice - SignalPoints;
+                    sig.SL = sig.IsLong
+                        ? sig.SignalPrice - SignalPoints
+                        : sig.SignalPrice + SignalPoints;
+                    sig.EntrySet = true;
+                    continue;     // siguiente señal
+                }
+
+                // 2) Si ya tiene entrada, comprobar TP / SL
+                if (sig.EntrySet && !sig.Done)
+                {
+                    bool hitTP = sig.IsLong ? High[0] >= sig.TP : Low[0]  <= sig.TP;
+                    bool hitSL = sig.IsLong ? Low[0]  <= sig.SL : High[0] >= sig.SL;
+
+                    if (hitTP || hitSL)
+                    {
+                        string result = hitTP ? "TP" : "SL";
+                        PrintLine(sig, result);
+                        sig.Done = true;
+                        pending.RemoveAt(i);
+                        barsUntilNextSignal = CooldownBars;   // enfriamiento global
+                    }
+                }
+            }
+
+            //----------------------------------------------------------------
+            // B)  COOLDOWN GLOBAL
+            //----------------------------------------------------------------
+            if (barsUntilNextSignal > 0)
+            {
+                barsUntilNextSignal--;
+                return;
+            }
+
+            //----------------------------------------------------------------
+            // C)  DETECTAR NUEVA SEÑAL
+            //----------------------------------------------------------------
+            if (DetectSignal(out bool isLong, out double prob))
+            {
+                var sig = new SignalData
+                {
+                    IsLong      = isLong,
+                    SignalBar   = CurrentBar,
+                    SignalTime  = Time[0],
+                    SignalPrice = Close[0]
+                };
+                pending.Add(sig);
+
+                // Flecha visual
+                if (isLong)
+                    Draw.ArrowUp  (this, "L"+CurrentBar, true, 0, Low[0]  - 2*TickSize, Brushes.Lime);
+                else
+                    Draw.ArrowDown(this, "S"+CurrentBar, true, 0, High[0] + 2*TickSize, Brushes.Fuchsia);
+            }
+        }
+
+        //--------------------------------------------------------------------
+        //  ►  DETECTOR DE SEÑAL (regresión logística + filtros)
+        //--------------------------------------------------------------------
+        private bool DetectSignal(out bool isLong, out double prob)
+        {
+            // Filtros de reversión básicos
+            bool revLong  = Close[2] < Open[2] && Close[1] < Open[1] && Close[0] > Open[0];
+            bool revShort = Close[2] > Open[2] && Close[1] > Open[1] && Close[0] < Open[0];
+
+            // Indicadores normalizados
+            double slope      = ema[0] - ema[5];
+            double normATR    = atr[0] / Close[0];
+            double normRSI    = rsi[0] / 100.0;
+            double momentum   = (Close[0] - Close[5]) / Close[0];
+            double distNorm   = Math.Abs(Close[0] - ema[0]) / TickSize;
+
+            prob = BetaEMA*slope + BetaATR*normATR + BetaRSI*normRSI +
+                   BetaMomentum*momentum + BetaDistEMA*distNorm;
+
+            // Volumen & desequilibrio
+            double buyVol  = Close[0] > Open[0] ? Volume[0] : 0;
+            double sellVol = Volume[0] - buyVol;
+            double imbalance = (buyVol - sellVol) / (buyVol + sellVol + 1);
+            double volSpike  = volMA[0] > 0 ? Volume[0] / volMA[0] : 0;
+
+            bool volOK       = volSpike   > ThresholdVolSpike;
+            bool imbalanceOK = imbalance  > ThresholdImbalance;
+
+            isLong = false;
+
+            if (revLong && prob >  MinProb && volOK && imbalanceOK)
+            { isLong = true;  return true; }
+
+            if (revShort && prob < -MinProb && volOK && imbalanceOK)
+            { isLong = false; return true; }
+
+            return false;
+        }
+
+        //--------------------------------------------------------------------
+        //  ►  IMPRESIÓN FORMATEADA
+        //--------------------------------------------------------------------
+        private void PrintLine(SignalData s, string result)
+        {
+            string t   = s.SignalTime.ToString("HH:mm:ss");
+            // Formato con coma decimal
+            string sp  = s.SignalPrice.ToString("0.00", CultureInfo.InvariantCulture).Replace('.', ',');
+            string ep  = s.EntryPrice .ToString("0.00", CultureInfo.InvariantCulture).Replace('.', ',');
+            string tp  = s.TP         .ToString("0.00", CultureInfo.InvariantCulture).Replace('.', ',');
+            string sl  = s.SL         .ToString("0.00", CultureInfo.InvariantCulture).Replace('.', ',');
+            string dir = s.IsLong ? "LONG" : "SHORT";
+
+            Print($"{dir}={t} - Señal {sp} Entrada={ep} - TP={tp} - SL={sl} - Resultado={result}");
+        }
+
+        //--------------------------------------------------------------------
+        //  ►  CLASE INTERNA PARA CADA SEÑAL
+        //--------------------------------------------------------------------
+        private class SignalData
+        {
+            public int       SignalBar;
+            public DateTime  SignalTime;
+            public bool      IsLong;
+            public double    SignalPrice;
+            public bool      EntrySet;
+            public double    EntryPrice, TP, SL;
+            public bool      Done;
+        }
+    }
+}

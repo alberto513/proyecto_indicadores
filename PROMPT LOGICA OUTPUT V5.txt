@@ -1,0 +1,61 @@
+PROMPT LOGICA OUTPUT V5
+Eres un experto desarrollador de NinjaTrader 8, especialista en indicadores de trading cuantitativos.  
+Tu misión es generar un indicador que:
+
+1. Detecte señales LONG/SHORT usando regresión logística combinada con EMA, RSI, ATR, volumen y momentum, y mantenga un pipeline de señales concurrido (varias a la vez).
+2. Para cada señal:
+   - Capture la hora exacta de la señal con `Time[0]`.
+   - Marque `signalBarIndex = CurrentBar` y `entryBarIndex = signalBarIndex + 1`.
+3. En la barra de entrada (`CurrentBar == entryBarIndex`):
+   - Lea `entryPrice = Open[0]`.
+   - Calcule:
+     ```csharp
+     tpPrice = entryPrice + (isLong ? SignalPoints * TickSize : -SignalPoints * TickSize);
+     slPrice = entryPrice - (isLong ? SignalPoints * TickSize : -SignalPoints * TickSize);
+     ```
+   - Almacene estos valores en la instancia de `SignalData`.
+   - Dibuje en el gráfico:
+     ```csharp
+     Draw.TriangleUp(this,  "sigLong"  + CurrentBar, false, 0, entryPrice - 2*TickSize, Brushes.Lime);
+     Draw.TriangleDown(this,"sigShort" + CurrentBar, false, 0, entryPrice + 2*TickSize, Brushes.Fuchsia);
+     ```
+4. En cada barra posterior, itere sobre la lista `pendingSignals` y para cada señal no completada:
+   - Evalúe:
+     ```csharp
+     bool hitTP = (sig.IsLong ? High[0] >= sig.TP : Low[0] <= sig.TP);
+     bool hitSL = (sig.IsLong ? Low[0] <= sig.SL  : High[0] >= sig.SL);
+     ```
+   - Si `hitTP || hitSL`, imprima EXACTAMENTE:
+     ```
+     {LONG|SHORT}=HH:mm:ss - Señal {precioSeñal:0.00} Entrada={precioEntrada:0.00} - TP={tpPrice:0.00} - SL={slPrice:0.00} - Resultado={TP|SL}
+     ```
+     formateado con coma decimal (p.ej. `.Replace('.', ',')`), marque `sig.Done = true` y remuévalo de `pendingSignals`.
+5. Al final, asegúrate de:
+   - Usar `Calculate.OnBarClose` para procesar solo una vez por barra.
+   - Incluir todos los `using` necesarios:
+     ```csharp
+     using System;
+     using System.Collections.Generic;
+     using System.Globalization;
+     using System.Windows.Media;
+     using NinjaTrader.Cbi;
+     using NinjaTrader.Data;
+     using NinjaTrader.Gui.Tools;
+     using NinjaTrader.NinjaScript;
+     using NinjaTrader.NinjaScript.Indicators;
+     using NinjaTrader.NinjaScript.DrawingTools;
+     ```
+   - Definir tu clase `public class ProbSignalPro : Indicator` con un `class SignalData { public int Bar; public DateTime Time; public bool IsLong; public double Entry, TP, SL; public bool Done; /*…*/ }`.
+   - Añadir propiedades ninja:
+     ```csharp
+     [NinjaScriptProperty]
+     public int SignalPoints { get; set; } = 10;
+     [NinjaScriptProperty]
+     public double MinProb { get; set; } = 0.6;
+     [NinjaScriptProperty]
+     public int CooldownBars { get; set; } = 5;
+     ```
+6. Comenta cada sección del código para que quien lo lea entienda la función de cada bloque.
+7. Finalmente, proporciónalo completo, listo para compilar en NinjaTrader 8, sin errores.
+
+Este prompt es la **base y materia prima** para que cualquier modelo ChatGPT genere un indicador **“ProbSignalPro”** con salidas 100 % confiables, con todas las piezas de código y la plantilla de salida que necesitas.

@@ -1,0 +1,525 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.IO;
+using NinjaTrader.Cbi;
+using NinjaTrader.Gui.Tools;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Strategies;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+using System.Windows.Media;
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public class MagnoFlux_v5_Modular_Institucional : Strategy
+    {
+        #region Parameters
+        [NinjaScriptProperty]
+        [Display(Name = "MinScore", Order = 1, GroupName = "Institutional")]
+        [Range(0.0, 10.0, ErrorMessage = "MinScore must be >= 0")]
+        public double MinScore { get; set; } = 3.0;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ExpertMode", Order = 2, GroupName = "Institutional")]
+        public bool ExpertMode { get; set; } = false;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ProfitTargetTicks", Order = 3, GroupName = "Parameters")]
+        [Range(1, int.MaxValue, ErrorMessage = "ProfitTargetTicks must be positive")]
+        public int ProfitTargetTicks { get; set; } = 60;
+
+        [NinjaScriptProperty]
+        [Display(Name = "StopLossTicks", Order = 4, GroupName = "Parameters")]
+        [Range(1, int.MaxValue, ErrorMessage = "StopLossTicks must be positive")]
+        public int StopLossTicks { get; set; } = 35;
+
+        [NinjaScriptProperty]
+        [Display(Name = "BaseContracts", Order = 5, GroupName = "Risk")]
+        [Range(1, int.MaxValue, ErrorMessage = "BaseContracts must be positive")]
+        public int BaseContracts { get; set; } = 1;
+
+        [NinjaScriptProperty]
+        [Display(Name = "MaxPositionSize", Order = 6, GroupName = "Risk")]
+        [Range(1, int.MaxValue, ErrorMessage = "MaxPositionSize must be positive")]
+        public int MaxPositionSize { get; set; } = 10;
+
+        [NinjaScriptProperty]
+        [Display(Name = "EnableLogging", Order = 7, GroupName = "Logging")]
+        public bool EnableLogging { get; set; } = true;
+
+        [NinjaScriptProperty]
+        [Display(Name = "LookbackSignals", Order = 8, GroupName = "Hertz")]
+        [Range(1, int.MaxValue, ErrorMessage = "LookbackSignals must be >= 1")]
+        public int LookbackSignals { get; set; } = 10;
+
+        [NinjaScriptProperty]
+        [Display(Name = "DrawdownPausePercent", Order = 9, GroupName = "Risk")]
+        [Range(0.1, 100.0, ErrorMessage = "DrawdownPausePercent must be positive")]
+        public double DrawdownPausePercent { get; set; } = 5.0;
+
+        [NinjaScriptProperty]
+        [Display(Name = "DailyProfitTarget", Order = 10, GroupName = "Risk")]
+        public double DailyProfitTarget { get; set; } = 1000.0;
+
+        [NinjaScriptProperty]
+        [Display(Name = "DailyLossLimit", Order = 11, GroupName = "Risk")]
+        public double DailyLossLimit { get; set; } = 1000.0;
+        #endregion
+
+        private SMA volumeSma;
+        private SMA volumeSmaShort;
+        private ATR atr;
+        private readonly List<DateTime> signalTimes = new List<DateTime>();
+
+        private double currentHz;
+        private double entryPrice;
+        private DateTime entryTime;
+        private double entryScore;
+        private MarketPosition entryDirection;
+        private double tpPrice;
+        private double slPrice;
+        private bool breakEvenDone;
+        private bool partial1Done;
+        private bool partial2Done;
+        private int currentSize;
+        private StreamWriter logWriter;
+        private readonly List<bool> lastResults = new List<bool>();
+        private double equityHigh;
+        private double entryHz;
+        private string pendingExitReason;
+        private DateTime sessionStart;
+        private double sessionProfit;
+        private int dailyTradeCount;
+
+        private bool scheduleEntry;
+        private MarketPosition scheduledDirection;
+        private DateTime scheduledTime;
+        private double scheduledScore;
+        private double scheduledPrice;
+        private int scheduledBar;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "MagnoFlux_v5_Modular_Institucional";
+                Calculate = Calculate.OnBarClose;
+                EntriesPerDirection = 1;
+                EntryHandling = EntryHandling.AllEntries;
+                IsExitOnSessionCloseStrategy = true;
+                IncludeCommission = true;
+                BarsRequiredToTrade = 0;
+            }
+            else if (State == State.DataLoaded)
+            {
+                volumeSma = SMA(Volume, 20);
+                volumeSmaShort = SMA(Volume, 10);
+                atr = ATR(14);
+                currentSize = BaseContracts;
+                equityHigh = 0;
+                sessionStart = Times[0][0].Date;
+                sessionProfit = 0;
+                dailyTradeCount = 0;
+                entryHz = 0;
+                pendingExitReason = string.Empty;
+                scheduleEntry = false;
+                scheduledDirection = MarketPosition.Flat;
+                if (EnableLogging)
+                {
+                    try
+                    {
+                        logWriter = new StreamWriter("MagnoFluxLog.csv", true);
+                        if (logWriter.BaseStream.Length == 0)
+                            logWriter.WriteLine("Direction,SignalTime,SignalPrice,Entry,TP,SL,Result,Score,Hz");
+                    }
+                    catch { }
+                }
+            }
+            else if (State == State.Terminated)
+            {
+                LogDailySummary();
+                if (logWriter != null)
+                {
+                    logWriter.Flush();
+                    logWriter.Dispose();
+                }
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < Math.Max(volumeSma.Period, atr.Period))
+                return;
+
+            if (Times[0][0].Date > sessionStart)
+            {
+                LogDailySummary();
+                sessionStart = Times[0][0].Date;
+                sessionProfit = 0;
+                dailyTradeCount = 0;
+            }
+
+            if (sessionProfit >= DailyProfitTarget || sessionProfit <= -DailyLossLimit)
+                return;
+
+            if (scheduleEntry && CurrentBar > scheduledBar)
+            {
+                Print($"SCHEDULED {scheduledDirection} @ {scheduledTime:HH:mm:ss} Score={scheduledScore}");
+                entryDirection = scheduledDirection;
+                entryScore = scheduledScore;
+                entryHz = currentHz;
+                UpdateRiskBeforeEntry(entryScore);
+                if (scheduledDirection == MarketPosition.Long)
+                    EnterLong(currentSize, "LongEntry");
+                else
+                    EnterShort(currentSize, "ShortEntry");
+                scheduleEntry = false;
+            }
+
+            if (Position.MarketPosition != MarketPosition.Flat)
+            {
+                ManagePosition();
+                return;
+            }
+
+            MarketPosition dir = DetectSignal();
+            if (dir == MarketPosition.Flat)
+                return;
+
+            double score = GetInstitutionalScore(dir == MarketPosition.Long);
+            Brush sigColor = dir == MarketPosition.Long ? Brushes.Lime : Brushes.Red;
+            double y = dir == MarketPosition.Long ? Low[0] - 2 * TickSize : High[0] + 2 * TickSize;
+            if (dir == MarketPosition.Long)
+                Draw.TriangleUp(this, "sig" + CurrentBar, false, 0, y, sigColor);
+            else
+                Draw.TriangleDown(this, "sig" + CurrentBar, false, 0, y, sigColor);
+            Draw.Text(this, "sigtext" + CurrentBar, $"{Time[0]:HH:mm:ss} | Score: {score} | Hz: {currentHz:F3}", 0, y, sigColor);
+
+            string reason = string.Empty;
+            if (!ValidateInstitutionalConditions(dir == MarketPosition.Long))
+                reason = "Conditions";
+            else if (score < MinScore)
+                reason = "LowScore";
+            else if (ExpertMode && !ExpertAllowed(score))
+                reason = "Expert";
+
+            if (!string.IsNullOrEmpty(reason))
+            {
+                Print($"NO ENTRY {reason} Score={score:F2}");
+                try { logWriter?.WriteLine($"{Time[0]:HH:mm:ss},NOENTRY,{reason}"); logWriter?.Flush(); } catch { }
+                return;
+            }
+
+            ConfirmEntry(dir, score);
+        }
+
+        private MarketPosition DetectSignal()
+        {
+            double range = High[0] - Low[0];
+            if (range <= 0)
+                return MarketPosition.Flat;
+            bool bullish = Close[0] > Open[0] && Close[1] < Open[1];
+            bool bearish = Close[0] < Open[0] && Close[1] > Open[1];
+            if (bullish) return MarketPosition.Long;
+            if (bearish) return MarketPosition.Short;
+            return MarketPosition.Flat;
+        }
+
+        private bool ValidateInstitutionalConditions(bool isLong)
+        {
+            bool volSpike = Volume[0] > volumeSma[0] * 1.5;
+            bool imbalance = isLong ? Close[0] > Open[0] : Close[0] < Open[0];
+            double seconds = signalTimes.Count > 0 ? (Time[0] - signalTimes[signalTimes.Count - 1]).TotalSeconds : 1;
+            bool speed = (High[0] - Low[0]) / seconds > TickSize;
+            Print($"volSpike={volSpike}, imbalance={imbalance}, speed={speed}");
+            if (ExpertMode)
+                return volSpike && imbalance && speed;
+            return (volSpike && imbalance) || (imbalance && speed);
+        }
+
+        private double GetInstitutionalScore(bool isLong)
+        {
+            int score = 0;
+            bool imbalance = isLong ? Close[0] > Open[0] : Close[0] < Open[0];
+            if (imbalance) score++;
+
+            bool volSpike = Volume[0] > volumeSma[0] * 1.5;
+            if (volSpike) score++;
+
+            bool rejectZone = isLong ? Close[0] > High[1] : Close[0] < Low[1];
+            if (rejectZone) score++;
+
+            if (!TrapInOpposite(isLong)) score++;
+
+            double body = Math.Abs(Close[0] - Open[0]);
+            if (body / (High[0] - Low[0]) > 0.7) score++;
+
+            double secondsSinceLast = signalTimes.Count > 0 ? (Time[0] - signalTimes[signalTimes.Count - 1]).TotalSeconds : 1;
+            bool speedScore = secondsSinceLast > 0 && (High[0] - Low[0]) / secondsSinceLast > TickSize * 1.5;
+            if (speedScore) score++;
+
+            if (Volume[0] > volumeSmaShort[0] * 2 && !rejectZone)
+                score--;
+
+            if (signalTimes.Count == 0 || secondsSinceLast > 30) score++;
+
+            if (score < 0) score = 0;
+            return score;
+        }
+
+        private bool TrapInOpposite(bool isLong)
+        {
+            if (signalTimes.Count == 0)
+                return false;
+            double prevClose = Close[1];
+            return isLong ? prevClose > High[1] : prevClose < Low[1];
+        }
+
+        private void ConfirmEntry(MarketPosition dir, double score)
+        {
+            UpdateRiskBeforeEntry(score);
+            Print($"CONFIRM {dir} Score={score:F2}");
+            scheduleEntry = true;
+            scheduledDirection = dir;
+            scheduledTime = Time[0];
+            scheduledScore = score;
+            scheduledPrice = Close[0];
+            scheduledBar = CurrentBar;
+            UpdateHz(Time[0]);
+        }
+
+        private void ExecuteExit(string type)
+        {
+            if (Position.MarketPosition == MarketPosition.Long)
+                ExitLong("Exit" + type, "");
+            else if (Position.MarketPosition == MarketPosition.Short)
+                ExitShort("Exit" + type, "");
+            LogSignal(type);
+        }
+
+        protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
+        {
+            if (execution.Order.OrderState != OrderState.Filled)
+                return;
+
+            if (execution.Order.Name == "LongEntry" || execution.Order.Name == "ShortEntry")
+            {
+                entryPrice = execution.Price;
+                entryTime = time;
+                entryHz = scheduledScore > 0 ? currentHz : entryHz;
+                tpPrice = entryDirection == MarketPosition.Long ? entryPrice + ProfitTargetTicks * TickSize : entryPrice - ProfitTargetTicks * TickSize;
+                slPrice = entryDirection == MarketPosition.Long ? entryPrice - StopLossTicks * TickSize : entryPrice + StopLossTicks * TickSize;
+                breakEvenDone = false;
+                partial1Done = false;
+                partial2Done = false;
+                dailyTradeCount++;
+                if (EnableLogging)
+                {
+                    LogEvent("Entry", execution.Price, quantity, execution.Order.Name);
+                    LogTradeLine(time, execution.Price, quantity, "Entry");
+                }
+            }
+            else if (execution.Order.Name.StartsWith("Exit") || execution.Order.Name.StartsWith("TP") || execution.Order.Name.StartsWith("SL") || execution.Order.Name.StartsWith("Partial"))
+            {
+                bool win = execution.Order.Name.Contains("TP");
+                lastResults.Add(win);
+                while (lastResults.Count > 3) lastResults.RemoveAt(0);
+
+                double direction = execution.Order.OrderAction == OrderAction.Sell ? 1 : -1;
+                double pnl = direction * (execution.Price - entryPrice) * execution.Quantity * (Instrument.MasterInstrument.PointValue == 0 ? 1 : Instrument.MasterInstrument.PointValue);
+                sessionProfit += pnl;
+
+                UpdateRiskAfterExit(win);
+                UpdateEquity();
+                if (EnableLogging)
+                {
+                    LogEvent(execution.Order.Name, execution.Price, execution.Quantity, $"PnL={pnl:F2}");
+                    string type = string.IsNullOrEmpty(pendingExitReason) ? execution.Order.Name : pendingExitReason;
+                    LogTradeLine(time, execution.Price, execution.Quantity, type);
+                    pendingExitReason = string.Empty;
+                }
+            }
+        }
+
+        private void ManagePosition()
+        {
+            if (Position.MarketPosition == MarketPosition.Flat)
+                return;
+
+            double profit = Position.MarketPosition == MarketPosition.Long ? Close[0] - entryPrice : entryPrice - Close[0];
+
+            if (!breakEvenDone && profit >= StopLossTicks * TickSize)
+            {
+                slPrice = entryPrice;
+                breakEvenDone = true;
+            }
+
+            if (!partial1Done && profit >= ProfitTargetTicks * 0.5 * TickSize && Position.Quantity > 1)
+            {
+                if (Position.MarketPosition == MarketPosition.Long)
+                    ExitLong(Math.Max(1, Position.Quantity / 2), "Partial1", "");
+                else
+                    ExitShort(Math.Max(1, Position.Quantity / 2), "Partial1", "");
+                partial1Done = true;
+                pendingExitReason = "PartialTP1";
+            }
+
+            if (!partial2Done && profit >= ProfitTargetTicks * 0.8 * TickSize && Position.Quantity > 1)
+            {
+                if (Position.MarketPosition == MarketPosition.Long)
+                    ExitLong(Math.Max(1, Position.Quantity / 2), "Partial2", "");
+                else
+                    ExitShort(Math.Max(1, Position.Quantity / 2), "Partial2", "");
+                partial2Done = true;
+                pendingExitReason = "PartialTP2";
+            }
+
+            if (Position.MarketPosition == MarketPosition.Long)
+            {
+                if (Low[0] <= slPrice)
+                {
+                    pendingExitReason = "SL";
+                    ExecuteExit("SL");
+                }
+                else if (High[0] >= tpPrice)
+                {
+                    pendingExitReason = "TP";
+                    ExecuteExit("TP");
+                }
+            }
+            else if (Position.MarketPosition == MarketPosition.Short)
+            {
+                if (High[0] >= slPrice)
+                {
+                    pendingExitReason = "SL";
+                    ExecuteExit("SL");
+                }
+                else if (Low[0] <= tpPrice)
+                {
+                    pendingExitReason = "TP";
+                    ExecuteExit("TP");
+                }
+            }
+        }
+
+        private void UpdateRiskBeforeEntry(double score)
+        {
+            if (currentHz < 0.01 || currentHz > 0.2)
+                currentSize = BaseContracts;
+            else if (score > 5 && currentSize < MaxPositionSize)
+                currentSize++;
+            else if (score < 4 && currentSize > 1)
+                currentSize--;
+        }
+
+        private void UpdateRiskAfterExit(bool win)
+        {
+            double accountValue = 0;
+            try { accountValue = Account.Get(AccountItem.CashValue, Currency.UsDollar); } catch { }
+            if (accountValue > equityHigh) equityHigh = accountValue;
+            if (accountValue < equityHigh * (1.0 - DrawdownPausePercent / 100.0))
+                currentSize = BaseContracts;
+            if (!win && currentSize > 1)
+                currentSize--;
+        }
+
+        private bool ExpertAllowed(double score)
+        {
+            if (score < 5.5)
+                return false;
+            if (IsConsolidating())
+                return false;
+            if (!EnoughRecentWins())
+                return false;
+            return true;
+        }
+
+        private bool IsConsolidating()
+        {
+            double atrValue = atr[0];
+            return (High[0] - Low[0]) < atrValue * 0.5;
+        }
+
+        private bool EnoughRecentWins()
+        {
+            if (lastResults.Count < 3)
+                return true;
+            int wins = 0;
+            foreach (bool r in lastResults)
+                if (r) wins++;
+            return wins >= 2;
+        }
+
+        private void UpdateHz(DateTime time)
+        {
+            signalTimes.Add(time);
+            if (signalTimes.Count > LookbackSignals)
+                signalTimes.RemoveAt(0);
+            if (signalTimes.Count > 1)
+            {
+                double totalSeconds = 0;
+                for (int i = 1; i < signalTimes.Count; i++)
+                    totalSeconds += (signalTimes[i] - signalTimes[i - 1]).TotalSeconds;
+                double avg = totalSeconds / (signalTimes.Count - 1);
+                currentHz = avg > 0 ? 1.0 / avg : 0.0;
+            }
+            else
+            {
+                currentHz = 0.0;
+            }
+        }
+
+        private void LogSignal(string result)
+        {
+            if (!EnableLogging)
+                return;
+            string dir = entryDirection == MarketPosition.Long ? "LONG" : "SHORT";
+            string line = $"{dir}={scheduledTime:HH:mm:ss} - Se\u00f1al {scheduledPrice:F2} Entrada={entryPrice:F2} - TP={tpPrice:F2} - SL={slPrice:F2} - Resultado={result}";
+            Print(line);
+            try { logWriter?.WriteLine(line); logWriter?.Flush(); } catch { }
+        }
+
+        private void LogEvent(string evt, double price, int qty, string comment)
+        {
+            string line = $"{Time[0]:yyyy-MM-dd HH:mm:ss},{evt},{price:F2},{qty},{comment}";
+            Print(line);
+            try { logWriter?.WriteLine(line); logWriter?.Flush(); } catch { }
+        }
+
+        private void LogTradeLine(DateTime logTime, double exitPrice, int qty, string type)
+        {
+            string dir = entryDirection == MarketPosition.Long ? "Long" : "Short";
+            double sign = entryDirection == MarketPosition.Long ? 1 : -1;
+            double points = (exitPrice - entryPrice) * sign;
+            double usd = points * qty * (Instrument.MasterInstrument.PointValue == 0 ? 1 : Instrument.MasterInstrument.PointValue);
+            double equity = 0; try { equity = Account.Get(AccountItem.CashValue, Currency.UsDollar); } catch { }
+            string line = $"{logTime:HH:mm:ss},{dir},{entryPrice:F2},{exitPrice:F2},{type},{points:F2},{usd:F2},{qty},{entryHz:F4},{entryScore},{equity:F2}";
+            Print(line);
+            try { logWriter?.WriteLine(line); logWriter?.Flush(); } catch { }
+        }
+
+        private void UpdateEquity()
+        {
+            double accountValue = 0;
+            try { accountValue = Account.Get(AccountItem.CashValue, Currency.UsDollar); } catch { }
+            if (accountValue <= 0)
+                return;
+            if (equityHigh == 0 || accountValue > equityHigh)
+                equityHigh = accountValue;
+            if (accountValue < equityHigh * (1.0 - DrawdownPausePercent / 100.0))
+            {
+                scheduleEntry = false;
+            }
+        }
+
+        private void LogDailySummary()
+        {
+            string line = $"SUMMARY {sessionStart:yyyy-MM-dd} Profit={sessionProfit:F2}";
+            Print(line);
+            try { logWriter?.WriteLine(line); logWriter?.Flush(); } catch { }
+        }
+    }
+}

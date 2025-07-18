@@ -1,0 +1,107 @@
+🟥🟧🟨🟩🟦🟪 PROMPT ULTRA-EXIGENTE PARA CODEX – MAGNOFLUX V5+ (Sin Piedad, Full Energía, Cero Compromisos)
+MagnoFlux_v5_Ultimate — Versión Prohibida para Humanos Mediocres
+
+ALCANZA EL LÍMITE ABSOLUTO DE CALIDAD, ROBUSTEZ, Y PODER ANALÍTICO
+Este encargo es tu examen final:
+No acepto “lo mejor que se puede”, ni “es suficiente”, ni “no se puede más”.
+Quiero que este código MAGNOFLUX utilice todos los recursos, lógica y creatividad posibles.
+Debe ser un benchmark en el mundo de la ingeniería de estrategias para NinjaTrader.
+
+👑 REQUISITOS DEBE CUMPLIR (NO OPCIONALES):
+Lógica institucional autoajustable
+
+MagnoFlux debe adaptarse en tiempo real al contexto de mercado.
+
+Recalcula y ajusta scores, filtros, targets, SL y trailing según volatilidad, volumen, rango, frecuencia de señales y drawdown.
+
+Implementa filtros de contexto para sesiones (overnight, pre-market, regular, cierre).
+
+Multi-nivel de señales
+
+Detección de señales de reversión, continuación, breakout, absorción, trampa, fake breakout, microtrends.
+
+Cada tipo de señal debe tener su propio score y se imprime el motivo detallado en el log.
+
+Permite múltiples lógicas simultáneas, con selección inteligente de la más fuerte.
+
+Gestión de riesgo y capital ultra-avanzada
+
+Gestión dinámica de contratos: aumenta/reduce tamaño según volatilidad, profit factor, racha y presión.
+
+Stop dinámico que ajusta el trailing según volatilidad, horario y resultado de trades anteriores.
+
+Auto-pausa tras mala racha, y auto-reinicio si el contexto cambia a favorable.
+
+Limita pérdidas por sesión, día, semana y porcentaje de equity.
+
+Output analítico hipercompleto
+
+Cada entrada, salida, cancelación o bloqueo debe imprimir:
+[HH:mm:ss] | Evento | Precio | Score | Qty | Vol | ATR | TipoSeñal | Motivo | Equity | Drawdown | Estado Mercado | Últimas 5 rachas
+
+Logs y CSV con headers, cada columna justificada y legible para análisis IA/Excel.
+
+Incluye una columna de “Riesgo Calculado” y otra de “Probabilidad Histórica” de éxito de la señal (basado en backtest online).
+
+Evolución automática (“autotuning”)
+
+MagnoFlux debe ajustar sus propios parámetros de score, TP, SL, trailing, filtros y tiempo de espera según el rendimiento reciente.
+
+Si detecta que una lógica baja de winrate, baja la exposición; si sube, la incrementa.
+
+Imprime en log los cambios de parámetros (con hora y motivo).
+
+Pruebas de estrés y modo “Turbo-Test”
+
+Añade un modo especial de testing donde ejecuta 1000+ operaciones simuladas rápidas para medir la robustez.
+
+Que permita forzar señales cada X barras para validar la salida, la lógica de gestión y los logs.
+
+Debug visual y de backtest
+
+Todas las señales y salidas deben quedar marcadas en el gráfico con líneas, colores y etiquetas diferenciadas.
+
+En modo test, que imprima un “mapa” de la actividad en consola.
+
+Estructura profesional, modular y documentada
+
+Divide el código en funciones: generación señal, validación, gestión riesgo, ejecución, logging, autoajuste.
+
+Comenta TODO lo que sea relevante para un developer institucional.
+
+Configurabilidad y control total
+
+Cada parámetro clave debe ser ajustable vía propiedades públicas.
+
+Permite exportar/importar configuraciones para distintos estilos de mercado.
+
+Eficiencia total (pero sin sacrificar lógica)
+
+No repitas cálculos, utiliza caché local para series intensas, limpia variables obsoletas.
+
+Optimiza para que pueda correr en real, demo y backtest.
+
+CONDICIONES NO NEGOCIABLES:
+NO uses lógica ni dependencias externas (nada de FPleme, Shark, ni inventos).
+
+SIEMPRE debes dejar constancia (print/log) de por qué se toma o no una entrada.
+
+SI no puedes cumplir uno de los puntos, explícalo y sugiere alternativa aún más avanzada.
+
+El objetivo es poder analizar, optimizar y evolucionar MagnoFlux sólo con estos logs y código.
+
+ENTREGA FINAL:
+Código 100% funcional, limpio, con toda la lógica pedida.
+
+Log de ejemplo y tabla CSV para análisis.
+
+Explicación de los nuevos parámetros y cómo afectan la gestión institucional.
+
+RECUERDA:
+Este encargo es para institucionales de verdad, no para retail ni amateurs.
+Si no llegás al límite, NO cumpliste el encargo.
+
+No quiero “lo mejor posible”. Quiero “lo que nunca nadie se animó a programar”.
+
+¡Devuelve el MagnoFlux definitivo, con lógica propia y el máximo poder de análisis y gestión!
+

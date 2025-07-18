@@ -1,0 +1,5 @@
+Instrumento;Acción;Cantidad;Precio;Tiempo;ID;E/X;Posición;ID de orden;Nombre;Comisión;Tarifa;Nombre de cuenta de pantalla;Conexión;
+GC 08-25;Vender;1;3363,7;02/07/2025 15:57:00;7418331b79c94916a346400b04dd51ba;Salida;-;cb40089e26e34d8bb8b18a853008ebde;SL;0,00 $;1;Playback101;Reproducción;
+GC 08-25;Comprar;1;3360,7;02/07/2025 14:00:59;0df86e099dec4a37993f81bfbda98d47;Entrada;1 L;b21501c1117349b4a84190e293ae46ae;LongEntry;0,00 $;1;Playback101;Reproducción;
+GC 08-25;Vender;1;3351,8;02/07/2025 06:35:25;e986e935936c4c929067e5f3f28b0e14;Salida;-;662c482696734b61ad2883730b4461a1;SL;0,00 $;1;Playback101;Reproducción;
+GC 08-25;Comprar;1;3348,4;02/07/2025 06:16:28;52ae8494f136429b9080f14ffb5d3631;Entrada;1 L;7e24bb16c6b94936b4adf1717d9ef785;LongEntry;0,00 $;1;Playback101;Reproducción;

@@ -1,0 +1,134 @@
+// ApexHunterPro_v1 - Basado en patrones reales extraídos del JSON
+// Muestra señales sólo cuando hay alta probabilidad según condiciones validadas
+
+// -------------------------------------------
+// ApexHunterPro_v1 – con salida de señales a Output para validación de aciertos
+// -------------------------------------------
+using System;
+using System.Globalization;
+using System.Windows.Media;
+using NinjaTrader.Data;
+using NinjaTrader.Gui.Tools;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class ApexHunterPro_v1 : Indicator
+    {
+        private EMA ema;
+        private RSI rsi;
+        private ATR atr;
+        private int lastSignalBar = -1000;
+        private bool inTrade = false;
+        private SignalData sig;
+
+        [NinjaScriptProperty] public int SignalPoints { get; set; } = 10;
+        [NinjaScriptProperty] public int CooldownBars { get; set; } = 5;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "ApexHunterPro_v1";
+                Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+                AddPlot(Brushes.Transparent, "Dummy");
+            }
+            else if (State == State.DataLoaded)
+            {
+                ema = EMA(14);
+                rsi = RSI(14, 1);
+                atr = ATR(14);
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 20 || CurrentBar <= lastSignalBar + CooldownBars)
+                return;
+
+            double emaSlope = (ema[0] - ema[1]) / TickSize;
+            double rsiVal = rsi[0];
+            double range = High[0] - Low[0];
+            double body = Math.Abs(Close[0] - Open[0]);
+            double distFromEMA = Math.Abs(Close[0] - ema[0]);
+
+            bool isBullish = Close[0] > Open[0];
+            bool isBearish = Close[0] < Open[0];
+            bool strongBody = body >= range * 0.6;
+            bool awayFromEMA = distFromEMA >= atr[0] * 0.3;
+
+            bool longCond = isBullish && strongBody && emaSlope > 0 && rsiVal > 55 && awayFromEMA;
+            bool shortCond = isBearish && strongBody && emaSlope < 0 && rsiVal < 45 && awayFromEMA;
+
+            if (!inTrade)
+            {
+                if (longCond)
+                {
+                    lastSignalBar = CurrentBar;
+                    EnterSignal(true);
+                }
+                else if (shortCond)
+                {
+                    lastSignalBar = CurrentBar;
+                    EnterSignal(false);
+                }
+            }
+
+            if (inTrade && sig != null && !sig.Done && CurrentBar > sig.EntryBar)
+            {
+                if (sig.IsLong && High[0] >= sig.TP) EndTrade("TP");
+                else if (!sig.IsLong && Low[0] <= sig.TP) EndTrade("TP");
+                else if (sig.IsLong && Low[0] <= sig.SL) EndTrade("SL");
+                else if (!sig.IsLong && High[0] >= sig.SL) EndTrade("SL");
+            }
+        }
+
+        private void EnterSignal(bool isLong)
+        {
+            double entry = Open[1];
+            double tp = isLong ? entry + SignalPoints * TickSize : entry - SignalPoints * TickSize;
+            double sl = isLong ? entry - SignalPoints * TickSize : entry + SignalPoints * TickSize;
+
+            sig = new SignalData
+            {
+                Time = Time[0],
+                EntryBar = CurrentBar + 1,
+                EntryPrice = entry,
+                TP = tp,
+                SL = sl,
+                IsLong = isLong,
+                Done = false
+            };
+            inTrade = true;
+
+            Brush color = isLong ? Brushes.Lime : Brushes.Red;
+            if (isLong)
+                Draw.TriangleUp(this, "L" + CurrentBar, false, 0, Low[0] - TickSize, color);
+            else
+                Draw.TriangleDown(this, "S" + CurrentBar, false, 0, High[0] + TickSize, color);
+
+            Print($"{(isLong ? "LONG" : "SHORT")}={sig.Time:HH:mm:ss} - Señal {sig.EntryPrice:F2} Entrada={sig.EntryPrice:F2} - TP={tp:F2} - SL={sl:F2} - Resultado=");
+        }
+
+        private void EndTrade(string result)
+        {
+            Print(result);
+            if (sig != null) sig.Done = true;
+            inTrade = false;
+        }
+
+        private class SignalData
+        {
+            public DateTime Time;
+            public int EntryBar;
+            public double EntryPrice;
+            public double TP;
+            public double SL;
+            public bool IsLong;
+            public bool Done;
+        }
+    }
+}

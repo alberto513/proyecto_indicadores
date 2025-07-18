@@ -1,0 +1,196 @@
+ProbSignalPro v3
+Señales totales: 14 521
+
+Señales ganadoras: 9 951
+
+Precisión global: 68.53 %
+
+
+
+
+
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Windows.Media;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.Data;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.NinjaScript.DrawingTools;
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    /// <summary>
+    /// ProbSignalPro v3: señales con filtros adicionales de momentum, EMA slope, distancia y RSI para elevar porcentaje de aciertos.
+    /// </summary>
+    public class ProbSignalPro_v3 : Indicator
+    {
+        private EMA ema;
+        private RSI rsi;
+        private ATR atr;
+        private int lastSignalBar = -1000;
+        private class SigInfo { public int Bar; public bool IsLong; public double Entry; public bool Done; }
+        private List<SigInfo> pending = new List<SigInfo>();
+
+        #region Coeficientes y configuración
+        [NinjaScriptProperty, Display(Name="Beta0", GroupName="Coefficients")] public double Beta0 { get; set; } = -1.234;
+        [NinjaScriptProperty, Display(Name="BetaEmaSlope", GroupName="Coefficients")] public double BetaEmaSlope { get; set; } = 0.567;
+        [NinjaScriptProperty, Display(Name="BetaRsiNorm", GroupName="Coefficients")] public double BetaRsiNorm { get; set; } = 0.345;
+        [NinjaScriptProperty, Display(Name="BetaAtrNorm", GroupName="Coefficients")] public double BetaAtrNorm { get; set; } = -0.123;
+        [NinjaScriptProperty, Display(Name="BetaDistEmaNorm", GroupName="Coefficients")] public double BetaDistEmaNorm { get; set; } = 0.789;
+        [NinjaScriptProperty, Display(Name="BetaMomNorm", GroupName="Coefficients")] public double BetaMomNorm { get; set; } = 0.456;
+
+        [NinjaScriptProperty, Range(0,1), Display(Name="MinProb", GroupName="Filters")]      public double MinProb { get; set; } = 0.75;
+        [NinjaScriptProperty, Range(1,100), Display(Name="MinMomTicks", GroupName="Filters")]  public int MinMomTicks { get; set; } = 10;
+        [NinjaScriptProperty, Range(1,100), Display(Name="MinEmaSlopeTicks", GroupName="Filters")] public int MinEmaSlopeTicks { get; set; } = 2;
+        [NinjaScriptProperty, Range(1,100), Display(Name="MinDistTicks", GroupName="Filters")] public int MinDistTicks { get; set; } = 10;
+        [NinjaScriptProperty, Display(Name="UseRSIFilter", GroupName="Filters")]             public bool UseRSIFilter { get; set; } = true;
+        [NinjaScriptProperty, Range(0.0,1.0), Display(Name="RSIThreshold", GroupName="Filters")]public double RSIThreshold { get; set; } = 0.5;
+
+        [NinjaScriptProperty, Range(1,100), Display(Name="CooldownBars", GroupName="Settings")] public int CooldownBars { get; set; } = 5;
+        [NinjaScriptProperty, Range(1,100), Display(Name="TpTicks", GroupName="Settings")]      public int TpTicks { get; set; } = 40;
+        [NinjaScriptProperty, Range(1,100), Display(Name="SlTicks", GroupName="Settings")]      public int SlTicks { get; set; } = 40;
+        #endregion
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = "ProbSignalPro v3: filtros de momentum, EMA slope, distancia y RSI.";
+                Name        = "ProbSignalPro_v3";
+                Calculate   = Calculate.OnBarClose;
+                IsOverlay   = true;
+                AddPlot(Brushes.Transparent, "Dummy");
+            }
+            else if (State == State.DataLoaded)
+            {
+                ema = EMA(14);
+                rsi = RSI(14,1);
+                atr = ATR(14);
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 20) return;
+
+            double emaSlope  = (ema[0] - ema[1]) / TickSize;
+            double rsiNorm   = rsi[0] / 100.0;
+            double atrTicks  = atr[0] / TickSize;
+            double distTicks = Math.Abs(Close[0] - ema[0]) / TickSize;
+            double momTicks  = (Close[0] - Close[1]) / TickSize;
+
+            double lin = Beta0
+                         + BetaEmaSlope   * emaSlope
+                         + BetaRsiNorm     * rsiNorm
+                         + BetaAtrNorm     * atrTicks
+                         + BetaDistEmaNorm * distTicks
+                         + BetaMomNorm     * momTicks;
+            double prob = 1 / (1 + Math.Exp(-lin));
+
+            bool baseL = prob >= MinProb && Close[0] > ema[0] && CurrentBar >= lastSignalBar + CooldownBars;
+            bool baseS = prob >= MinProb && Close[0] < ema[0] && CurrentBar >= lastSignalBar + CooldownBars;
+
+            bool isLong = baseL;
+            bool isShort= baseS;
+
+            if (isLong || isShort)
+            {
+                bool momOK  = isLong ? momTicks  >= MinMomTicks : momTicks  <= -MinMomTicks;
+                bool emaOK  = isLong ? emaSlope  >= MinEmaSlopeTicks : emaSlope  <= -MinEmaSlopeTicks;
+                bool distOK = distTicks >= MinDistTicks;
+                bool rsiOK  = !UseRSIFilter || (isLong ? rsiNorm  >= RSIThreshold : rsiNorm <= 1 - RSIThreshold);
+
+                if (momOK && emaOK && distOK && rsiOK)
+                {
+                    int bar    = CurrentBar;
+                    double entry = Open[0];
+                    pending.Add(new SigInfo{ Bar = bar, IsLong = isLong, Entry = entry });
+                    lastSignalBar = bar;
+
+                    if (isLong)
+                        Draw.ArrowUp(this, $"L{bar}", false, 0, Low[0] - atr[0] * 0.5, Brushes.LimeGreen);
+                    else
+                        Draw.ArrowDown(this,$"S{bar}", false, 0, High[0] + atr[0] * 0.5, Brushes.Red);
+                }
+            }
+
+            foreach (var s in pending)
+            {
+                if (s.Done) continue;
+                bool tp = s.IsLong ? High[0] >= s.Entry + TpTicks * TickSize : Low[0]  <= s.Entry - SlTicks * TickSize;
+                bool sl = s.IsLong ? Low[0]  <= s.Entry - SlTicks * TickSize : High[0] >= s.Entry + TpTicks * TickSize;
+                if (tp || sl || CurrentBar >= s.Bar + CooldownBars)
+                {
+                    s.Done = true;
+                    string res = tp ? "TP" : "SL";
+                    PrintSignal(Time[s.Bar], s.IsLong, prob, emaSlope, rsiNorm, atrTicks, distTicks, momTicks, res);
+                }
+            }
+        }
+
+        private void PrintSignal(DateTime sigTime, bool isLong, double prob, double es, double rn, double at, double dt, double mt, string res)
+        {
+            Print($"{sigTime:HH:mm:ss} - {(isLong?"LONG":"SHORT")} - P(TP)={prob:P1} - EMAticks={es:F1} - RSIn={rn:F2} - ATRticks={at:F1} - DistTicks={dt:F1} - MomTicks={mt:F1} - Resultado={res}");
+        }
+    }
+}
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private ProbSignalPro_v3[] cacheProbSignalPro_v3;
+		public ProbSignalPro_v3 ProbSignalPro_v3(double beta0, double betaEmaSlope, double betaRsiNorm, double betaAtrNorm, double betaDistEmaNorm, double betaMomNorm, double minProb, int minMomTicks, int minEmaSlopeTicks, int minDistTicks, bool useRSIFilter, int cooldownBars, int tpTicks, int slTicks)
+		{
+			return ProbSignalPro_v3(Input, beta0, betaEmaSlope, betaRsiNorm, betaAtrNorm, betaDistEmaNorm, betaMomNorm, minProb, minMomTicks, minEmaSlopeTicks, minDistTicks, useRSIFilter, cooldownBars, tpTicks, slTicks);
+		}
+
+		public ProbSignalPro_v3 ProbSignalPro_v3(ISeries<double> input, double beta0, double betaEmaSlope, double betaRsiNorm, double betaAtrNorm, double betaDistEmaNorm, double betaMomNorm, double minProb, int minMomTicks, int minEmaSlopeTicks, int minDistTicks, bool useRSIFilter, int cooldownBars, int tpTicks, int slTicks)
+		{
+			if (cacheProbSignalPro_v3 != null)
+				for (int idx = 0; idx < cacheProbSignalPro_v3.Length; idx++)
+					if (cacheProbSignalPro_v3[idx] != null && cacheProbSignalPro_v3[idx].Beta0 == beta0 && cacheProbSignalPro_v3[idx].BetaEmaSlope == betaEmaSlope && cacheProbSignalPro_v3[idx].BetaRsiNorm == betaRsiNorm && cacheProbSignalPro_v3[idx].BetaAtrNorm == betaAtrNorm && cacheProbSignalPro_v3[idx].BetaDistEmaNorm == betaDistEmaNorm && cacheProbSignalPro_v3[idx].BetaMomNorm == betaMomNorm && cacheProbSignalPro_v3[idx].MinProb == minProb && cacheProbSignalPro_v3[idx].MinMomTicks == minMomTicks && cacheProbSignalPro_v3[idx].MinEmaSlopeTicks == minEmaSlopeTicks && cacheProbSignalPro_v3[idx].MinDistTicks == minDistTicks && cacheProbSignalPro_v3[idx].UseRSIFilter == useRSIFilter && cacheProbSignalPro_v3[idx].CooldownBars == cooldownBars && cacheProbSignalPro_v3[idx].TpTicks == tpTicks && cacheProbSignalPro_v3[idx].SlTicks == slTicks && cacheProbSignalPro_v3[idx].EqualsInput(input))
+						return cacheProbSignalPro_v3[idx];
+			return CacheIndicator<ProbSignalPro_v3>(new ProbSignalPro_v3(){ Beta0 = beta0, BetaEmaSlope = betaEmaSlope, BetaRsiNorm = betaRsiNorm, BetaAtrNorm = betaAtrNorm, BetaDistEmaNorm = betaDistEmaNorm, BetaMomNorm = betaMomNorm, MinProb = minProb, MinMomTicks = minMomTicks, MinEmaSlopeTicks = minEmaSlopeTicks, MinDistTicks = minDistTicks, UseRSIFilter = useRSIFilter, CooldownBars = cooldownBars, TpTicks = tpTicks, SlTicks = slTicks }, input, ref cacheProbSignalPro_v3);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.ProbSignalPro_v3 ProbSignalPro_v3(double beta0, double betaEmaSlope, double betaRsiNorm, double betaAtrNorm, double betaDistEmaNorm, double betaMomNorm, double minProb, int minMomTicks, int minEmaSlopeTicks, int minDistTicks, bool useRSIFilter, int cooldownBars, int tpTicks, int slTicks)
+		{
+			return indicator.ProbSignalPro_v3(Input, beta0, betaEmaSlope, betaRsiNorm, betaAtrNorm, betaDistEmaNorm, betaMomNorm, minProb, minMomTicks, minEmaSlopeTicks, minDistTicks, useRSIFilter, cooldownBars, tpTicks, slTicks);
+		}
+
+		public Indicators.ProbSignalPro_v3 ProbSignalPro_v3(ISeries<double> input , double beta0, double betaEmaSlope, double betaRsiNorm, double betaAtrNorm, double betaDistEmaNorm, double betaMomNorm, double minProb, int minMomTicks, int minEmaSlopeTicks, int minDistTicks, bool useRSIFilter, int cooldownBars, int tpTicks, int slTicks)
+		{
+			return indicator.ProbSignalPro_v3(input, beta0, betaEmaSlope, betaRsiNorm, betaAtrNorm, betaDistEmaNorm, betaMomNorm, minProb, minMomTicks, minEmaSlopeTicks, minDistTicks, useRSIFilter, cooldownBars, tpTicks, slTicks);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.ProbSignalPro_v3 ProbSignalPro_v3(double beta0, double betaEmaSlope, double betaRsiNorm, double betaAtrNorm, double betaDistEmaNorm, double betaMomNorm, double minProb, int minMomTicks, int minEmaSlopeTicks, int minDistTicks, bool useRSIFilter, int cooldownBars, int tpTicks, int slTicks)
+		{
+			return indicator.ProbSignalPro_v3(Input, beta0, betaEmaSlope, betaRsiNorm, betaAtrNorm, betaDistEmaNorm, betaMomNorm, minProb, minMomTicks, minEmaSlopeTicks, minDistTicks, useRSIFilter, cooldownBars, tpTicks, slTicks);
+		}
+
+		public Indicators.ProbSignalPro_v3 ProbSignalPro_v3(ISeries<double> input , double beta0, double betaEmaSlope, double betaRsiNorm, double betaAtrNorm, double betaDistEmaNorm, double betaMomNorm, double minProb, int minMomTicks, int minEmaSlopeTicks, int minDistTicks, bool useRSIFilter, int cooldownBars, int tpTicks, int slTicks)
+		{
+			return indicator.ProbSignalPro_v3(input, beta0, betaEmaSlope, betaRsiNorm, betaAtrNorm, betaDistEmaNorm, betaMomNorm, minProb, minMomTicks, minEmaSlopeTicks, minDistTicks, useRSIFilter, cooldownBars, tpTicks, slTicks);
+		}
+	}
+}
+
+#endregion

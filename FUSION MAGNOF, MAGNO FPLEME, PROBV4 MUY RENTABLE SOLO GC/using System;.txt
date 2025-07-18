@@ -1,0 +1,223 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Globalization;
+using NinjaTrader.Cbi;
+using NinjaTrader.Gui.Tools;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Strategies;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+using System.Windows.Media;
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    /// <summary>
+    /// Estrategia institucional que fusiona MagnoFlux_v4, ProbSignalPro_v5 y
+    /// MagnoFPlemeAuto. Esta versión resume las funcionalidades clave de los
+    /// tres scripts originales y está pensada para operar con Wicked Renko.
+    /// Algunas características avanzadas han sido simplificadas para mantener
+    /// claridad de ejemplo. Revisar secciones marcadas TODO para posibles
+    /// ajustes o ampliaciones.
+    /// </summary>
+    public class MagnoInstitutionalComposite : Strategy
+    {
+        #region Parametros configurables
+        [NinjaScriptProperty]
+        [Range(1, int.MaxValue), Display(Name="RenkoSize", Order=1, GroupName="Parametros")]
+        public int RenkoSize { get; set; } = 30;
+
+        [NinjaScriptProperty]
+        [Range(0.1, double.MaxValue), Display(Name="MinProb", Order=2, GroupName="Probabilidad")]
+        public double MinProb { get; set; } = 0.75;
+
+        [NinjaScriptProperty]
+        [Range(1, int.MaxValue), Display(Name="LookbackRuptura", Order=3, GroupName="Contexto")]
+        public int LookbackRuptura { get; set; } = 10;
+
+        [NinjaScriptProperty]
+        [Display(Name="SoloVisual", Order=4, GroupName="General")]
+        public bool SoloVisual { get; set; } = false;
+        #endregion
+
+        #region Campos internos
+        private EMA ema;
+        private RSI rsi;
+        private ATR atr;
+        private SMA volumeSma;
+        private Momentum momentum;
+
+        private double lastVolume;
+        private int lastSignalBar;
+
+        private int currentSize;
+        private int consecutiveLosses;
+        private int consecutiveWins;
+
+        private double entryPrice;
+        private double stopPrice;
+        private double tpPrice;
+        private bool trailing;
+        private bool partialExitDone;
+        #endregion
+
+        protected override void OnStateChange()
+        {
+            if(State == State.SetDefaults)
+            {
+                Name = "MagnoInstitutionalComposite";
+                Calculate = Calculate.OnBarClose;
+                EntriesPerDirection = 1;
+                EntryHandling = EntryHandling.AllEntries;
+                IsExitOnSessionCloseStrategy = true;
+                IncludeCommission = true;
+            }
+            else if(State == State.DataLoaded)
+            {
+                ema = EMA(14);
+                rsi = RSI(14,1);
+                atr = ATR(14);
+                volumeSma = SMA(Volume,5);
+                momentum = Momentum(14);
+
+                lastVolume = 0;
+                lastSignalBar = -1000;
+                currentSize = 1;
+                consecutiveLosses = 0;
+                consecutiveWins = 0;
+                trailing = false;
+                partialExitDone = false;
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if(CurrentBar < Math.Max(20, LookbackRuptura+1))
+                return;
+
+            // --- PROBABILIDAD Y CONTEXTO ---
+            double emaSlope = (ema[0] - ema[1]) / TickSize;
+            double rsiNorm  = rsi[0] / 100.0;
+            double atrTicks = atr[0] / TickSize;
+            double distTicks= Math.Abs(Close[0] - ema[0]) / TickSize;
+            double momTicks = (Close[0] - Close[1]) / TickSize;
+            double fluxo    = Math.Abs(Volume[0] - lastVolume)
+                            + Math.Abs((Close[0] - Open[0]) / TickSize);
+            lastVolume = Volume[0];
+
+            // Betas fijos sacados de ProbSignalPro_v5
+            double lin = -1.0
+                        + 0.6 * emaSlope
+                        + 0.4 * rsiNorm
+                        - 0.2 * atrTicks
+                        + 0.7 * distTicks
+                        + 0.5 * momTicks
+                        + 1.2 * fluxo;
+            double prob = 1 / (1 + Math.Exp(-lin));
+
+            bool contextoAlcista = Close[0] > MAX(High, LookbackRuptura)[1];
+            bool contextoBajista = Close[0] < MIN(Low, LookbackRuptura)[1];
+            bool volumenOk       = Volume[0] >= volumeSma[0];
+            bool impulsoOk       = momentum[0] > 0;
+
+            bool isLong  = prob >= MinProb && contextoAlcista && volumenOk && impulsoOk;
+
+            // --- Señal de entrada ---
+            if(Position.MarketPosition == MarketPosition.Flat && isLong && CurrentBar >= lastSignalBar + 5)
+            {
+                lastSignalBar = CurrentBar;
+                double atrVal = atr[0];
+                entryPrice = Close[0];
+                tpPrice = entryPrice + atrVal*2;  // objetivo 2 ATR
+                stopPrice = entryPrice - atrVal*1.5; // stop 1.5 ATR
+                trailing = false;
+                partialExitDone = false;
+
+                if(!SoloVisual)
+                    EnterLong(currentSize, "LongEntry");
+                Draw.TriangleUp(this, "L"+CurrentBar, false, 0, Low[0]-2*TickSize, Brushes.Lime);
+            }
+
+            // --- Gestión activa de la posición ---
+            if(Position.MarketPosition == MarketPosition.Long)
+            {
+                ManagePosition();
+            }
+        }
+
+        private void ManagePosition()
+        {
+            double atrVal = atr[0];
+            
+            if(!trailing)
+            {
+                double activation = entryPrice + (tpPrice - entryPrice)*0.7;
+                if(Close[0] >= activation)
+                {
+                    trailing = true;
+                }
+            }
+
+            if(trailing)
+            {
+                double newStop = Close[0] - atrVal*1.5;
+                if(newStop > stopPrice)
+                    stopPrice = newStop;
+            }
+
+            if(!partialExitDone && High[0] >= entryPrice + (tpPrice-entryPrice)*0.5 && Position.Quantity>1)
+            {
+                int qty = Math.Max(1, Position.Quantity/2);
+                ExitLong(qty, "PartialTP", "");
+                partialExitDone = true;
+            }
+
+            if(High[0] >= tpPrice)
+            {
+                ExitLong("TP"," ");
+            }
+            else if(Low[0] <= stopPrice)
+            {
+                ExitLong("SL"," ");
+            }
+        }
+
+        protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
+        {
+            if(execution.Order.OrderState != OrderState.Filled)
+                return;
+
+            if(execution.Order.Name == "LongEntry")
+            {
+                // registrar precio de entrada real
+                entryPrice = execution.Price;
+            }
+            else if(execution.Order.Name == "TP" || execution.Order.Name == "SL")
+            {
+                bool win = execution.Order.Name == "TP";
+                if(win)
+                {
+                    consecutiveWins++;
+                    consecutiveLosses = 0;
+                    if(consecutiveWins >= 2)
+                    {
+                        currentSize = Math.Min(currentSize+1, 4); // crecer suavemente
+                        consecutiveWins = 0;
+                    }
+                }
+                else
+                {
+                    consecutiveLosses++;
+                    consecutiveWins = 0;
+                    if(consecutiveLosses >= 2)
+                    {
+                        currentSize = Math.Max(1, currentSize-1);
+                        consecutiveLosses = 0;
+                    }
+                }
+            }
+        }
+    }
+}

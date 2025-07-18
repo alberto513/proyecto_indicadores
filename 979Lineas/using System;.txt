@@ -1,0 +1,959 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.IO;
+using NinjaTrader.Cbi;
+using NinjaTrader.Data;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Gui.SuperDom;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.Strategies;
+using NinjaTrader.NinjaScript.DrawingTools;
+using System.Windows.Media;
+using System.Windows;
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public class MagnoFlux_v4_WickedRenko_Only : Strategy
+    {
+        #region Parameters
+        [NinjaScriptProperty]
+        [Display(Name = "RenkoSize", Order = 1, GroupName = "Parameters")]
+        [Range(1, int.MaxValue, ErrorMessage = "RenkoSize must be positive")]
+        public int RenkoSize { get; set; } = 30;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ProfitTargetTicks", Order = 2, GroupName = "Parameters")]
+        [Range(1, int.MaxValue, ErrorMessage = "ProfitTargetTicks must be positive")]
+        public int ProfitTargetTicks { get; set; } = 60; // recomendado TP > SL
+
+        [NinjaScriptProperty]
+        [Display(Name = "StopLossTicks", Order = 3, GroupName = "Parameters")]
+        [Range(1, int.MaxValue, ErrorMessage = "StopLossTicks must be positive")]
+        public int StopLossTicks { get; set; } = 35;
+
+        [NinjaScriptProperty]
+        [Display(Name = "EnableLogging", Order = 4, GroupName = "Parameters")]
+        public bool EnableLogging { get; set; } = true;
+
+        [NinjaScriptProperty]
+        [Display(Name = "LookbackSignals", Order = 5, GroupName = "Hertz")]
+        [Range(2, int.MaxValue, ErrorMessage = "LookbackSignals must be >= 2")]
+        public int LookbackSignals { get; set; } = 10;
+
+        [NinjaScriptProperty]
+        [Display(Name = "EnableHzLogging", Order = 6, GroupName = "Hertz")]
+        public bool EnableHzLogging { get; set; } = false;
+
+        [NinjaScriptProperty]
+        [Display(Name = "CsvFileName", Order = 7, GroupName = "Hertz")]
+        public string CsvFileName { get; set; } = "HertzTuner.csv";
+
+        // new parameters
+        [NinjaScriptProperty]
+        [Display(Name = "BaseContracts", Order = 8, GroupName = "MoneyManagement")]
+        [Range(1, int.MaxValue, ErrorMessage = "BaseContracts must be positive")]
+        public int BaseContracts { get; set; } = 1;
+
+        [NinjaScriptProperty]
+        [Display(Name = "MaxPositionSize", Order = 9, GroupName = "MoneyManagement")]
+        [Range(1, int.MaxValue, ErrorMessage = "MaxPositionSize must be positive")]
+        public int MaxPositionSize { get; set; } = 16;
+
+        [NinjaScriptProperty]
+        [Display(Name = "MaxConsecutiveSL", Order = 10, GroupName = "MoneyManagement")]
+        [Range(1, int.MaxValue, ErrorMessage = "MaxConsecutiveSL must be positive")]
+        public int MaxConsecutiveSL { get; set; } = 3;
+
+        [NinjaScriptProperty]
+        [Display(Name = "RiskPercent", Order = 11, GroupName = "MoneyManagement")]
+        [Range(0.1, 100.0, ErrorMessage = "RiskPercent must be > 0")]
+        public double RiskPercent { get; set; } = 1.0;
+
+        public enum MoneyManagementMethod { Martingala, AntiMartingala, Fibonacci, Kelly, Fixed }
+
+        [NinjaScriptProperty]
+        [Display(Name = "ManagementMethod", Order = 12, GroupName = "MoneyManagement")]
+        public MoneyManagementMethod ManagementMethod { get; set; } = MoneyManagementMethod.Fixed;
+
+        [NinjaScriptProperty]
+        [Display(Name = "AtrPeriod", Order = 13, GroupName = "MoneyManagement")]
+        [Range(1, int.MaxValue, ErrorMessage = "AtrPeriod must be positive")]
+        public int AtrPeriod { get; set; } = 14;
+
+        [NinjaScriptProperty]
+        [Display(Name = "TpAtrMultiplier", Order = 14, GroupName = "MoneyManagement")]
+        [Range(0.1, double.MaxValue, ErrorMessage = "TpAtrMultiplier must be > 0")]
+        public double TpAtrMultiplier { get; set; } = 2.0;
+
+        [NinjaScriptProperty]
+        [Display(Name = "SlAtrMultiplier", Order = 15, GroupName = "MoneyManagement")]
+        [Range(0.1, double.MaxValue, ErrorMessage = "SlAtrMultiplier must be > 0")]
+        public double SlAtrMultiplier { get; set; } = 1.5;
+
+        [NinjaScriptProperty]
+        [Display(Name = "TrailingActivation", Order = 16, GroupName = "MoneyManagement")]
+        [Range(0.1, 1.0, ErrorMessage = "TrailingActivation must be between 0 and 1")]
+        public double TrailingActivation { get; set; } = 0.7;
+
+        [NinjaScriptProperty]
+        [Display(Name = "PartialTp", Order = 17, GroupName = "MoneyManagement")]
+        [Range(0.1, 1.0, ErrorMessage = "PartialTp must be between 0 and 1")]
+        public double PartialTp { get; set; } = 0.5;
+
+        [NinjaScriptProperty]
+        [Display(Name = "DrawdownPausePercent", Order = 18, GroupName = "MoneyManagement")]
+        [Range(0.1, 100.0, ErrorMessage = "DrawdownPausePercent must be positive")]
+        public double DrawdownPausePercent { get; set; } = 3.0;
+
+        [NinjaScriptProperty]
+        [Display(Name = "PauseSignals", Order = 19, GroupName = "MoneyManagement")]
+        [Range(1, int.MaxValue, ErrorMessage = "PauseSignals must be positive")]
+        public int PauseSignals { get; set; } = 5;
+
+        // trailing and partial close configuration
+        [NinjaScriptProperty]
+        [Display(Name = "ProfitLockPercent", Order = 20, GroupName = "Protection")]
+        [Range(0.1, 1.0, ErrorMessage = "ProfitLockPercent must be between 0 and 1")]
+        public double ProfitLockPercent { get; set; } = 0.6; // porcentaje de ganancia asegurada
+
+        [NinjaScriptProperty]
+        [Display(Name = "FirstObjectiveTicks", Order = 21, GroupName = "Protection")]
+        [Range(1, int.MaxValue, ErrorMessage = "FirstObjectiveTicks must be positive")]
+        public int FirstObjectiveTicks { get; set; } = 40; // 10 puntos
+
+        [NinjaScriptProperty]
+        [Display(Name = "Partial1Ticks", Order = 22, GroupName = "Protection")]
+        [Range(1, int.MaxValue, ErrorMessage = "Partial1Ticks must be positive")]
+        public int Partial1Ticks { get; set; } = 32; // 8 puntos
+
+        [NinjaScriptProperty]
+        [Display(Name = "Partial2Ticks", Order = 23, GroupName = "Protection")]
+        [Range(1, int.MaxValue, ErrorMessage = "Partial2Ticks must be positive")]
+        public int Partial2Ticks { get; set; } = 60; // 15 puntos
+
+        [NinjaScriptProperty]
+        [Display(Name = "DailyProfitTarget", Order = 24, GroupName = "Protection")]
+        public double DailyProfitTarget { get; set; } = 1000.0;
+
+        [NinjaScriptProperty]
+        [Display(Name = "DailyLossLimit", Order = 25, GroupName = "Protection")]
+        public double DailyLossLimit { get; set; } = 1000.0;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ExpertMode", Order = 26, GroupName = "Advanced")]
+        public bool ExpertMode { get; set; } = false;
+
+        [NinjaScriptProperty]
+        [Display(Name = "MaxTradesPerDay", Order = 27, GroupName = "Advanced")]
+        [Range(1, int.MaxValue, ErrorMessage = "MaxTradesPerDay must be positive")]
+        public int MaxTradesPerDay { get; set; } = 6;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ScoreThreshold", Order = 28, GroupName = "Advanced")]
+        [Range(0.0, 10.0, ErrorMessage = "ScoreThreshold must be >= 0")]
+        public double ScoreThreshold { get; set; } = 3.0;
+
+        [NinjaScriptProperty]
+        [Display(Name = "AvoidOpenFilter", Order = 29, GroupName = "Advanced")]
+        public bool AvoidOpenFilter { get; set; } = false;
+
+        [NinjaScriptProperty]
+        [Display(Name = "PauseAfterSL", Order = 30, GroupName = "Advanced")]
+        [Range(0, int.MaxValue, ErrorMessage = "PauseAfterSL must be >= 0")]
+        public int PauseAfterSL { get; set; } = 0;
+
+        [NinjaScriptProperty]
+        [Display(Name = "StartTime", Order = 31, GroupName = "Session")]
+        public string StartTime { get; set; } = "00:30";
+
+        [NinjaScriptProperty]
+        [Display(Name = "EndTime", Order = 32, GroupName = "Session")]
+        public string EndTime { get; set; } = "16:00";
+
+        [NinjaScriptProperty]
+        [Display(Name = "OpenBufferMinutes", Order = 33, GroupName = "Session")]
+        [Range(0, int.MaxValue, ErrorMessage = "OpenBufferMinutes must be >= 0")]
+        public int OpenBufferMinutes { get; set; } = 5;
+
+        [NinjaScriptProperty]
+        [Display(Name = "MinBarsBetweenOpposite", Order = 34, GroupName = "Advanced")]
+        [Range(0, int.MaxValue, ErrorMessage = "MinBarsBetweenOpposite must be >= 0")]
+        public int MinBarsBetweenOpposite { get; set; } = 3;
+
+        [NinjaScriptProperty]
+        [Display(Name = "NarrowRangeMultiplier", Order = 35, GroupName = "Advanced")]
+        [Range(0.0, double.MaxValue, ErrorMessage = "NarrowRangeMultiplier must be > 0")]
+        public double NarrowRangeMultiplier { get; set; } = 0.5;
+
+        [NinjaScriptProperty]
+        [Display(Name = "WideRangeMultiplier", Order = 36, GroupName = "Advanced")]
+        [Range(0.1, double.MaxValue, ErrorMessage = "WideRangeMultiplier must be > 0")]
+        public double WideRangeMultiplier { get; set; } = 3.0;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ConsolidationLookback", Order = 37, GroupName = "Advanced")]
+        [Range(1, int.MaxValue, ErrorMessage = "ConsolidationLookback must be >= 1")]
+        public int ConsolidationLookback { get; set; } = 10;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ConsolidationRangeMultiplier", Order = 38, GroupName = "Advanced")]
+        [Range(0.1, double.MaxValue, ErrorMessage = "ConsolidationRangeMultiplier must be > 0")]
+        public double ConsolidationRangeMultiplier { get; set; } = 2.0;
+        #endregion
+
+        private double entryPrice;
+        private double stopPrice;
+        private int entryBar;
+        private bool movedToBreakeven;
+        private double maxProfit;
+
+        private SMA volumeSma;
+        private Momentum momentum;
+        private EMA emaFast;
+        private EMA emaSlow;
+        private EMA emaTrend;
+        private RSI rsi;
+        private MAX maxHigh;
+        private MIN minLow;
+
+        private readonly List<DateTime> signalTimes = new List<DateTime>();
+        private double currentHz;
+
+        // money management state
+        private int currentSize;
+        private int consecutiveLosses;
+        private int fibIndex;
+
+        private ATR atr;
+        private double tpPrice;
+        private double slPrice;
+        private bool trailingActive;
+        private bool partialExit1Done;
+        private bool partialExit2Done;
+        private int pauseCounter;
+        private int consecutiveWins;
+        private double equityHigh;
+        private int tradeCount;
+        private int winCount;
+        private readonly Dictionary<string, double> pairProfits = new Dictionary<string, double>();
+        private StreamWriter logWriter;
+        private DateTime sessionStart;
+        private double sessionProfit;
+        private int dailyTradeCount;
+        private readonly List<int> failedSignalBars = new List<int>();
+        private int consecutiveTP;
+        private int lastSignalBar;
+        private MarketPosition lastSignalDirection;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "MagnoFlux_v4_WickedRenko_Only";
+                Calculate = Calculate.OnBarClose;
+                EntriesPerDirection = 1;
+                EntryHandling = EntryHandling.AllEntries;
+                IsExitOnSessionCloseStrategy = true;
+                IncludeCommission = true;
+                BarsRequiredToTrade = 0;
+            }
+            else if (State == State.DataLoaded)
+            {
+                volumeSma = SMA(Volume, 5);
+                momentum = Momentum(14);
+                emaFast = EMA(14);
+                emaSlow = EMA(28);
+                emaTrend = EMA(60);
+                rsi = RSI(14, 3);
+                maxHigh = MAX(High, ConsolidationLookback);
+                minLow = MIN(Low, ConsolidationLookback);
+                atr = ATR(AtrPeriod);
+                currentSize = BaseContracts;
+                consecutiveLosses = 0;
+                fibIndex = 0;
+                trailingActive = false;
+                partialExit1Done = false;
+                partialExit2Done = false;
+                pauseCounter = 0;
+                consecutiveWins = 0;
+                tradeCount = 0;
+                winCount = 0;
+                equityHigh = 0;
+                sessionStart = Times[0][0].Date;
+                sessionProfit = 0;
+                dailyTradeCount = 0;
+                consecutiveTP = 0;
+                lastSignalBar = -100;
+                lastSignalDirection = MarketPosition.Flat;
+                if (EnableLogging)
+                {
+                    try
+                    {
+                        logWriter = new StreamWriter("MagnoFluxLog.csv", true);
+                        if (logWriter.BaseStream.Length == 0)
+                            logWriter.WriteLine("Time,Event,Price,Qty,Comment");
+                    }
+                    catch { }
+                }
+            }
+            else if (State == State.Terminated)
+            {
+                if (logWriter != null)
+                {
+                    logWriter.Flush();
+                    logWriter.Dispose();
+                }
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < Math.Max(Math.Max(volumeSma.Period, momentum.Period), AtrPeriod))
+                return;
+
+            int longScore = GetSignalScore(true);
+            int shortScore = GetSignalScore(false);
+            string debugReason = $"L:{longScore} S:{shortScore}";
+
+            if (!InTradingHours())
+            {
+                debugReason += " OutTime";
+                Draw.Text(this, "debug" + CurrentBar, debugReason, 0, Low[0] - 3 * TickSize, Brushes.Gray);
+                return;
+            }
+
+            if (!IsValidRange())
+            {
+                debugReason += " Range";
+                Draw.Text(this, "debug" + CurrentBar, debugReason, 0, Low[0] - 3 * TickSize, Brushes.Gray);
+                return;
+            }
+
+            if (InConsolidation())
+            {
+                debugReason += " Consolid";
+                Draw.Text(this, "debug" + CurrentBar, debugReason, 0, Low[0] - 3 * TickSize, Brushes.Gray);
+                return;
+            }
+
+            // reset daily tracking
+            if (Times[0][0].Date > sessionStart)
+            {
+                sessionStart = Times[0][0].Date;
+                sessionProfit = 0;
+                equityHigh = Account.Get(AccountItem.CashValue, Currency.UsDollar);
+                dailyTradeCount = 0;
+            }
+
+            // pause if daily profit or loss reached
+            if (sessionProfit >= DailyProfitTarget || sessionProfit <= -DailyLossLimit)
+            {
+                debugReason += " Limit";
+                Draw.Text(this, "debug" + CurrentBar, debugReason, 0, Low[0] - 3 * TickSize, Brushes.Gray);
+                return;
+            }
+
+            if (pauseCounter > 0)
+            {
+                if (IsValidLongSignal() || IsValidShortSignal())
+                {
+                    pauseCounter--;
+                    if (EnableLogging)
+                        LogEvent("PAUSE", Close[0], 0, $"Remaining {pauseCounter} signals");
+                }
+                debugReason += " Pause";
+                Draw.Text(this, "debug" + CurrentBar, debugReason, 0, Low[0] - 3 * TickSize, Brushes.Gray);
+                return;
+            }
+
+            // expert mode trade limit
+            if (ExpertMode && dailyTradeCount >= MaxTradesPerDay)
+            {
+                debugReason += " MaxTrades";
+                Draw.Text(this, "debug" + CurrentBar, debugReason, 0, Low[0] - 3 * TickSize, Brushes.Gray);
+                return;
+            }
+
+
+            if (Position.MarketPosition == MarketPosition.Flat)
+            {
+                if (IsValidLongSignal())
+                {
+                    if (lastSignalDirection == MarketPosition.Short && CurrentBar - lastSignalBar <= MinBarsBetweenOpposite)
+                        debugReason += " Opposite";
+                    else
+                        EnterStrategyLong();
+                }
+                else if (IsValidShortSignal())
+                {
+                    if (lastSignalDirection == MarketPosition.Long && CurrentBar - lastSignalBar <= MinBarsBetweenOpposite)
+                        debugReason += " Opposite";
+                    else
+                        EnterStrategyShort();
+                }
+                else
+                {
+                    debugReason += " LowScore";
+                }
+            }
+            else
+            {
+                ManagePosition();
+            }
+
+            Brush displayColor = Brushes.Gray;
+            if (currentHz >= 0.01 && currentHz <= 0.2)
+                displayColor = Brushes.Lime;      // VERDE institucional (prender)
+            else if ((currentHz >= 0.005 && currentHz < 0.01) || (currentHz > 0.2 && currentHz <= 0.5))
+                displayColor = Brushes.Gold;      // AMARILLO (operar con cautela)
+            else
+                displayColor = Brushes.Red;       // ROJO (no operar)
+
+            Draw.TextFixed(this, "HertzDisplay", $"Hz: {currentHz:F4}", TextPosition.TopRight, displayColor, new Gui.Tools.SimpleFont("Arial", 16), Brushes.Transparent, Brushes.Transparent, 0);
+
+            Draw.Text(this, "debug" + CurrentBar, debugReason, 0, Low[0] - 3 * TickSize, Brushes.Gray);
+        }
+
+        private void EnterStrategyLong()
+        {
+            LogHertz(Time[0]);
+            if (EnableLogging)
+                LogEvent("SignalLong", Close[0], currentSize, $"Hz={currentHz:F4}");
+            Draw.TriangleUp(this, "LongSignal" + CurrentBar, false, 0, Low[0] - 2 * TickSize, Brushes.Lime);
+            lastSignalBar = CurrentBar;
+            lastSignalDirection = MarketPosition.Long;
+            EnterLong(currentSize, "LongEntry");
+        }
+
+        private void EnterStrategyShort()
+        {
+            LogHertz(Time[0]);
+            if (EnableLogging)
+                LogEvent("SignalShort", Close[0], currentSize, $"Hz={currentHz:F4}");
+            Draw.TriangleDown(this, "ShortSignal" + CurrentBar, false, 0, High[0] + 2 * TickSize, Brushes.Red);
+            lastSignalBar = CurrentBar;
+            lastSignalDirection = MarketPosition.Short;
+            EnterShort(currentSize, "ShortEntry");
+        }
+
+        protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
+        {
+            if (execution.Order.OrderState == OrderState.Filled &&
+                (execution.Order.Name == "LongEntry" || execution.Order.Name == "ShortEntry"))
+            {
+                entryPrice = execution.Price;
+                entryBar = CurrentBar;
+                movedToBreakeven = false;
+                trailingActive = false;
+                partialExit1Done = false;
+                partialExit2Done = false;
+                maxProfit = 0;
+                if (execution.Order.Name == "LongEntry")
+                {
+                    slPrice = entryPrice - StopLossTicks * TickSize;
+                    tpPrice = entryPrice + ProfitTargetTicks * TickSize;
+                }
+                else
+                {
+                    slPrice = entryPrice + StopLossTicks * TickSize;
+                    tpPrice = entryPrice - ProfitTargetTicks * TickSize;
+                }
+                stopPrice = slPrice;
+                dailyTradeCount++;
+                if (EnableLogging)
+                    LogEvent("Entry", execution.Price, quantity, execution.Order.Name);
+            }
+            else if (execution.Order.OrderState == OrderState.Filled &&
+                (execution.Order.Name == "TP" || execution.Order.Name == "SL" || execution.Order.Name == "PartialTP1" || execution.Order.Name == "PartialTP2"))
+            {
+                bool win = execution.Order.Name == "TP" || execution.Order.Name.StartsWith("PartialTP");
+                bool fullTP = execution.Order.Name == "TP";
+
+                double direction = execution.Order.OrderAction == OrderAction.Sell ? 1 : -1;
+                double pnl = direction * (execution.Price - entryPrice) * execution.Quantity * (Instrument.MasterInstrument.PointValue == 0 ? 1 : Instrument.MasterInstrument.PointValue);
+
+                tradeCount++;
+                if (win) winCount++;
+                sessionProfit += pnl;
+
+                string key = $"{TpAtrMultiplier:F2}|{SlAtrMultiplier:F2}";
+                if (!pairProfits.ContainsKey(key)) pairProfits[key] = 0;
+                pairProfits[key] += pnl;
+
+                UpdateSizeAfterTrade(win, fullTP);
+                UpdateEquity();
+                AdjustParameters();
+                if (EnableLogging)
+                    LogEvent(execution.Order.Name, execution.Price, execution.Quantity, $"PnL={pnl:F2}");
+
+                if (!win)
+                {
+                    failedSignalBars.Add(CurrentBar);
+                    failedSignalBars.RemoveAll(b => CurrentBar - b > 10);
+                    if (consecutiveLosses >= 2 && failedSignalBars.Count > 0)
+                    {
+                        pauseCounter = Math.Max(pauseCounter, 3);
+                        LogEvent("EmotionalPause", Close[0], 0, "");
+                    }
+                }
+            }
+        }
+
+        private int GetSignalScore(bool isLong)
+        {
+            int score = 0;
+            double body = Math.Abs(Close[0] - Open[0]);
+            double range = High[0] - Low[0];
+
+            if (isLong)
+            {
+                if (momentum[0] > 0) score++;
+                if (Volume[0] > volumeSma[0]) score++;
+                if (currentHz >= 0.01 && currentHz <= 0.2) score++;
+                if (range > 0 && body / range > 0.7) score++;
+                if (Close[0] > emaFast[0] && emaFast[0] > emaSlow[0] && emaSlow[0] > emaTrend[0]) score++;
+                if (Close[0] > Open[0]) score++;
+            }
+            else
+            {
+                if (momentum[0] < 0) score++;
+                if (Volume[0] > volumeSma[0]) score++;
+                if (currentHz >= 0.01 && currentHz <= 0.2) score++;
+                if (range > 0 && body / range > 0.7) score++;
+                if (Close[0] < emaFast[0] && emaFast[0] < emaSlow[0] && emaSlow[0] < emaTrend[0]) score++;
+                if (Close[0] < Open[0]) score++;
+            }
+
+            if (Math.Abs(Open[0] - Close[0]) > atr[0]) score++;
+
+            if (currentHz > 0.2) score++;
+
+            return score;
+        }
+
+        private bool IsValidLongSignal()
+        {
+            return GetSignalScore(true) >= ScoreThreshold && TrendAligned(true) && NotOverboughtOversold(true) && !InConsolidation();
+        }
+
+        private bool IsValidShortSignal()
+        {
+            return GetSignalScore(false) >= ScoreThreshold && TrendAligned(false) && NotOverboughtOversold(false) && !InConsolidation();
+        }
+
+        private bool TrendAligned(bool isLong)
+        {
+            return isLong
+                ? emaFast[0] > emaSlow[0] && emaSlow[0] > emaTrend[0] && momentum[0] > 0
+                : emaFast[0] < emaSlow[0] && emaSlow[0] < emaTrend[0] && momentum[0] < 0;
+        }
+
+        private bool NotOverboughtOversold(bool isLong)
+        {
+            return isLong ? rsi[0] < 70 : rsi[0] > 30;
+        }
+
+        private bool InConsolidation()
+        {
+            return maxHigh[0] - minLow[0] < atr[0] * ConsolidationRangeMultiplier;
+        }
+
+        private bool InTradingHours()
+        {
+            TimeSpan start = TimeSpan.Parse(StartTime);
+            TimeSpan end = TimeSpan.Parse(EndTime);
+            TimeSpan now = Times[0][0].TimeOfDay;
+            if (now < start || now > end)
+                return false;
+
+            DateTime dt = Times[0][0];
+            DateTime open = new DateTime(dt.Year, dt.Month, dt.Day, 9, 30, 0, dt.Kind);
+            if (dt >= open && (dt - open).TotalMinutes < OpenBufferMinutes)
+                return false;
+
+            return true;
+        }
+
+        private bool IsValidRange()
+        {
+            double range = High[1] - Low[1];
+            double atrValue = atr[1];
+            if (range > atrValue * WideRangeMultiplier) return false;
+            if (range < atrValue * NarrowRangeMultiplier) return false;
+            return true;
+        }
+
+        private void ManagePosition()
+        {
+            if (Position.MarketPosition == MarketPosition.Flat)
+                return;
+
+            double atrValue = atr[0];
+            double currentProfit = Position.MarketPosition == MarketPosition.Long
+                ? Close[0] - entryPrice
+                : entryPrice - Close[0];
+            if (currentProfit > maxProfit)
+            {
+                maxProfit = currentProfit;
+                if (EnableLogging)
+                    LogEvent("NewMaxProfit", Close[0], Position.Quantity, $"MaxProfit={maxProfit:F2}");
+            }
+
+            // move to breakeven after first objective
+            if (!movedToBreakeven && currentProfit >= FirstObjectiveTicks * TickSize)
+            {
+                movedToBreakeven = true;
+                stopPrice = entryPrice;
+                if (EnableLogging)
+                    LogEvent("BreakEven", stopPrice, Position.Quantity, "First objective reached");
+            }
+
+            // dynamic trailing locking profit
+            double lockPrice = Position.MarketPosition == MarketPosition.Long
+                ? entryPrice + maxProfit * ProfitLockPercent
+                : entryPrice - maxProfit * ProfitLockPercent;
+            if (Position.MarketPosition == MarketPosition.Long)
+            {
+                if (lockPrice > stopPrice)
+                {
+                    stopPrice = lockPrice;
+                    LogEvent("Trail", stopPrice, Position.Quantity, "Long lock");
+                }
+            }
+            else if (Position.MarketPosition == MarketPosition.Short)
+            {
+                if (lockPrice < stopPrice)
+                {
+                    stopPrice = lockPrice;
+                    LogEvent("Trail", stopPrice, Position.Quantity, "Short lock");
+                }
+            }
+
+            // trailing by ATR if activated
+            if (!trailingActive)
+            {
+                double activationLevel = Position.MarketPosition == MarketPosition.Long
+                    ? entryPrice + (tpPrice - entryPrice) * TrailingActivation
+                    : entryPrice - (entryPrice - tpPrice) * TrailingActivation;
+                if (Position.MarketPosition == MarketPosition.Long && Close[0] >= activationLevel)
+                {
+                    trailingActive = true;
+                    LogEvent("ATRTrailOn", Close[0], Position.Quantity, "");
+                }
+                else if (Position.MarketPosition == MarketPosition.Short && Close[0] <= activationLevel)
+                {
+                    trailingActive = true;
+                    LogEvent("ATRTrailOn", Close[0], Position.Quantity, "");
+                }
+            }
+
+            if (trailingActive)
+            {
+                if (Position.MarketPosition == MarketPosition.Long)
+                {
+                    double newStop = Close[0] - atrValue * SlAtrMultiplier;
+                    if (newStop > stopPrice)
+                    {
+                        stopPrice = newStop;
+                        LogEvent("ATRTrail", stopPrice, Position.Quantity, "Long");
+                    }
+                }
+                else if (Position.MarketPosition == MarketPosition.Short)
+                {
+                    double newStop = Close[0] + atrValue * SlAtrMultiplier;
+                    if (newStop < stopPrice)
+                    {
+                        stopPrice = newStop;
+                        LogEvent("ATRTrail", stopPrice, Position.Quantity, "Short");
+                    }
+                }
+            }
+
+            // partial exits
+            double partial1Target = Position.MarketPosition == MarketPosition.Long
+                ? entryPrice + Partial1Ticks * TickSize
+                : entryPrice - Partial1Ticks * TickSize;
+            double partial2Target = Position.MarketPosition == MarketPosition.Long
+                ? entryPrice + Partial2Ticks * TickSize
+                : entryPrice - Partial2Ticks * TickSize;
+
+            if (!partialExit1Done && ((Position.MarketPosition == MarketPosition.Long && High[0] >= partial1Target) ||
+                                      (Position.MarketPosition == MarketPosition.Short && Low[0] <= partial1Target)) && Position.Quantity > 2)
+            {
+                int qty = Math.Max(1, Position.Quantity / 3);
+                if (Position.MarketPosition == MarketPosition.Long)
+                    ExitLong(qty, "PartialTP1", "");
+                else
+                    ExitShort(qty, "PartialTP1", "");
+                partialExit1Done = true;
+                LogEvent("Partial1", Close[0], qty, "");
+            }
+
+            if (!partialExit2Done && ((Position.MarketPosition == MarketPosition.Long && High[0] >= partial2Target) ||
+                                      (Position.MarketPosition == MarketPosition.Short && Low[0] <= partial2Target)) && Position.Quantity > 1)
+            {
+                int qty = Math.Max(1, Position.Quantity / 2);
+                if (Position.MarketPosition == MarketPosition.Long)
+                    ExitLong(qty, "PartialTP2", "");
+                else
+                    ExitShort(qty, "PartialTP2", "");
+                partialExit2Done = true;
+                LogEvent("Partial2", Close[0], qty, "");
+            }
+
+            // close for reversal
+            if (Position.MarketPosition == MarketPosition.Long)
+            {
+                if ((momentum[0] < 0 && Close[0] < emaFast[0]) || Volume[0] > volumeSma[0] * 2)
+                {
+                    ExitLong("SL", "");
+                    LogEvent("ReversalExit", Close[0], Position.Quantity, "Long");
+                }
+                else if (Low[0] <= stopPrice)
+                {
+                    ExitLong("SL", "");
+                    LogEvent("Stop", stopPrice, Position.Quantity, "Long");
+                }
+                else if (High[0] >= tpPrice)
+                {
+                    ExitLong("TP", "");
+                    LogEvent("TP", tpPrice, Position.Quantity, "Long");
+                }
+            }
+            else if (Position.MarketPosition == MarketPosition.Short)
+            {
+                if ((momentum[0] > 0 && Close[0] > emaFast[0]) || Volume[0] > volumeSma[0] * 2)
+                {
+                    ExitShort("SL", "");
+                    LogEvent("ReversalExit", Close[0], Position.Quantity, "Short");
+                }
+                else if (High[0] >= stopPrice)
+                {
+                    ExitShort("SL", "");
+                    LogEvent("Stop", stopPrice, Position.Quantity, "Short");
+                }
+                else if (Low[0] <= tpPrice)
+                {
+                    ExitShort("TP", "");
+                    LogEvent("TP", tpPrice, Position.Quantity, "Short");
+                }
+            }
+        }
+
+        private void LogHertz(DateTime time)
+        {
+            signalTimes.Add(time);
+            if (signalTimes.Count > LookbackSignals)
+                signalTimes.RemoveAt(0);
+
+            if (signalTimes.Count >= 2)
+            {
+                double totalSeconds = 0;
+                for (int i = 1; i < signalTimes.Count; i++)
+                {
+                    totalSeconds += (signalTimes[i] - signalTimes[i - 1]).TotalSeconds;
+                }
+                double avgSeconds = totalSeconds / (signalTimes.Count - 1);
+                if (avgSeconds > 0)
+                {
+                    currentHz = 1.0 / avgSeconds;
+                }
+            }
+
+            if (EnableHzLogging)
+            {
+                string logLine = $"{time:yyyy-MM-dd HH:mm:ss},{currentHz:F6}";
+                Print(logLine);
+                try
+                {
+                    File.AppendAllText(CsvFileName, logLine + Environment.NewLine);
+                }
+                catch { }
+            }
+        }
+
+        private void LogEvent(string evt, double price, int qty, string comment)
+        {
+            string line = $"{Time[0]:yyyy-MM-dd HH:mm:ss},{evt},{price:F2},{qty},{comment}";
+            Print(line);
+            try { logWriter?.WriteLine(line); logWriter?.Flush(); } catch { }
+        }
+
+        private void UpdateSizeAfterTrade(bool win, bool fullTP)
+        {
+            if (fullTP)
+                consecutiveTP++;
+            else if (!win)
+                consecutiveTP = 0;
+
+            if (win)
+            {
+                consecutiveWins++;
+                consecutiveLosses = 0;
+                fibIndex = Math.Max(0, fibIndex - 2);
+            }
+            else
+            {
+                consecutiveLosses++;
+                consecutiveWins = 0;
+            }
+
+            if (!win)
+            {
+                if (ManagementMethod == MoneyManagementMethod.Martingala && WinRate() >= 0.6)
+                    currentSize = Math.Min(currentSize * 2, MaxPositionSize);
+                else if (ManagementMethod == MoneyManagementMethod.AntiMartingala)
+                    currentSize = BaseContracts;
+                else if (ManagementMethod == MoneyManagementMethod.Fibonacci)
+                {
+                    fibIndex++;
+                    currentSize = Math.Min(Fibonacci(fibIndex) * BaseContracts, MaxPositionSize);
+                }
+                if (consecutiveLosses >= MaxConsecutiveSL)
+                {
+                    currentSize = BaseContracts;
+                    fibIndex = 0;
+                    consecutiveLosses = 0;
+                    pauseCounter = PauseSignals;
+                    LogEvent("PauseLosses", Close[0], 0, "");
+                }
+            }
+            else
+            {
+                switch (ManagementMethod)
+                {
+                    case MoneyManagementMethod.Martingala:
+                        currentSize = BaseContracts;
+                        break;
+                    case MoneyManagementMethod.AntiMartingala:
+                        currentSize = Math.Min((int)Math.Ceiling(currentSize * 2.0), MaxPositionSize);
+                        break;
+                    case MoneyManagementMethod.Fibonacci:
+                        currentSize = fibIndex > 1 ? Fibonacci(fibIndex - 2) * BaseContracts : BaseContracts;
+                        fibIndex = fibIndex > 1 ? fibIndex - 2 : 0;
+                        currentSize = Math.Min(currentSize, MaxPositionSize);
+                        break;
+                    case MoneyManagementMethod.Kelly:
+                        currentSize = CalculateRiskSize();
+                        break;
+                    case MoneyManagementMethod.Fixed:
+                        currentSize = BaseContracts;
+                        break;
+                }
+            }
+
+            if (consecutiveLosses >= 2)
+            {
+                currentSize = Math.Max(1, (int)Math.Floor(currentSize * 0.5));
+                if (PauseAfterSL > 0)
+                {
+                    pauseCounter = PauseAfterSL;
+                    LogEvent("PauseSL", Close[0], 0, "");
+                }
+                consecutiveLosses = 0;
+            }
+            else if (consecutiveWins >= 2)
+            {
+                currentSize = Math.Min(MaxPositionSize, (int)Math.Ceiling(currentSize * 1.5));
+                consecutiveWins = 0;
+            }
+
+            if (ExpertMode)
+            {
+                if (consecutiveTP >= 2)
+                {
+                    currentSize = Math.Min(MaxPositionSize, currentSize + 1);
+                    consecutiveTP = 0;
+                }
+            }
+
+            if (ManagementMethod == MoneyManagementMethod.Kelly && !win)
+                currentSize = CalculateRiskSize();
+            if (ManagementMethod == MoneyManagementMethod.Fixed)
+                currentSize = BaseContracts;
+
+            if (EnableLogging)
+                LogEvent("Size", Close[0], currentSize, ManagementMethod.ToString());
+        }
+
+        private int Fibonacci(int n)
+        {
+            if (n <= 1)
+                return 1;
+            int a = 1, b = 1, c = 1;
+            for (int i = 2; i <= n; i++)
+            {
+                c = a + b;
+                a = b;
+                b = c;
+            }
+            return c;
+        }
+
+        private int CalculateRiskSize()
+        {
+            double accountValue = 0;
+            try
+            {
+                accountValue = Account.Get(AccountItem.CashValue, Currency.UsDollar);
+            }
+            catch { }
+            double riskPerContract = StopLossTicks * TickSize * (Instrument.MasterInstrument.PointValue == 0 ? 1 : Instrument.MasterInstrument.PointValue);
+            if (riskPerContract <= 0)
+                return BaseContracts;
+            int qty = (int)Math.Floor((accountValue * RiskPercent / 100.0) / riskPerContract);
+            qty = Math.Max(1, Math.Min(qty, MaxPositionSize));
+            return qty;
+        }
+
+        private double WinRate()
+        {
+            return tradeCount > 0 ? (double)winCount / tradeCount : 0.0;
+        }
+
+        private void UpdateEquity()
+        {
+            double accountValue = 0;
+            try { accountValue = Account.Get(AccountItem.CashValue, Currency.UsDollar); } catch { }
+            if (accountValue <= 0)
+                return;
+            if (equityHigh == 0 || accountValue > equityHigh)
+                equityHigh = accountValue;
+            if (accountValue < equityHigh * (1.0 - DrawdownPausePercent / 100.0))
+            {
+                pauseCounter = PauseSignals;
+                LogEvent("Drawdown", Close[0], 0, "Pausing signals");
+            }
+        }
+
+        private void AdjustParameters()
+        {
+            if (tradeCount == 0 || tradeCount % 20 != 0)
+                return;
+            double best = double.MinValue;
+            string bestKey = null;
+            foreach (var kv in pairProfits)
+            {
+                if (kv.Value > best)
+                {
+                    best = kv.Value;
+                    bestKey = kv.Key;
+                }
+            }
+            if (bestKey != null)
+            {
+                var parts = bestKey.Split('|');
+                if (parts.Length == 2 && double.TryParse(parts[0], out double tp) && double.TryParse(parts[1], out double sl))
+                {
+                    TpAtrMultiplier = tp;
+                    SlAtrMultiplier = sl;
+                    LogEvent("Params", Close[0], 0, $"TP={TpAtrMultiplier} SL={SlAtrMultiplier}");
+                }
+            }
+        }
+    }
+}

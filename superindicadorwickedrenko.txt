@@ -1,0 +1,209 @@
+using System;
+using System.ComponentModel.DataAnnotations;
+using System.Windows.Media;
+using NinjaTrader.Cbi;
+using NinjaTrader.Data;
+using NinjaTrader.Gui.Tools;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class SuperIndicadorWickedFluxo : Indicator
+    {
+        // Parámetros configurables
+        [Range(1, 50), NinjaScriptProperty]
+        public int VolumeWindow { get; set; } = 14;
+
+        [Range(1, 50), NinjaScriptProperty]
+        public int SpeedWindow { get; set; } = 10;
+
+        [Range(1, 20), NinjaScriptProperty]
+        public int CooldownBars { get; set; } = 5;
+
+        [Range(0.01, 1.0), NinjaScriptProperty]
+        public double LogisticThreshold { get; set; } = 0.80;
+
+        [Range(1, 100), NinjaScriptProperty]
+        public int SignalPoints { get; set; } = 10;
+
+        // Series y estado interno
+        private Series<double> vsSeries, rawSpeedSeries, ssSeries, imbSeries, mcSeries;
+        private Series<double> pLong, pShort;
+        private int lastSignalBar = -100;
+
+        // Variables de señal abierta
+        private bool signalActive = false;
+        private bool signalIsLong;
+        private int signalBarIndex, entryBarIndex;
+        private DateTime signalTime;
+        private double signalPrice, entryPrice, tpPrice, slPrice;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = "SuperIndicador WickedFluxo con TP/SL y resultado";
+                Name = "SuperIndicadorWickedFluxo";
+                Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+                DisplayInDataBox = true;
+                AddPlot(Brushes.Transparent, "HiddenPlot");
+            }
+            else if (State == State.DataLoaded)
+            {
+                vsSeries = new Series<double>(this);
+                rawSpeedSeries = new Series<double>(this);
+                ssSeries = new Series<double>(this);
+                imbSeries = new Series<double>(this);
+                mcSeries = new Series<double>(this);
+                pLong = new Series<double>(this);
+                pShort = new Series<double>(this);
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < Math.Max(VolumeWindow, SpeedWindow) + 2)
+                return;
+
+            // Cálculo de módulos base
+            double avgVol = EMA(Volume, VolumeWindow)[0];
+            vsSeries[0] = Math.Min(5, Volume[0] / (avgVol == 0 ? 1 : avgVol));
+
+            double deltaPrice = Math.Abs(Close[0] - Close[1]);
+            rawSpeedSeries[0] = deltaPrice;
+            double avgSpeed = EMA(rawSpeedSeries, SpeedWindow)[0];
+            ssSeries[0] = (deltaPrice - avgSpeed) / (avgSpeed == 0 ? 1 : avgSpeed);
+
+            double buyVol = Close[0] > Open[0] ? Volume[0] : 0;
+            double sellVol = Volume[0] - buyVol;
+            imbSeries[0] = (buyVol - sellVol) / (buyVol + sellVol + 1);
+
+            mcSeries[0] = EMA(Close, 12)[0] - EMA(Close, 26)[0] > 0 ? 1 : -1;
+
+            double z = -0.5 + 0.8 * vsSeries[0] + 0.6 * ssSeries[0] + 1.2 * imbSeries[0] + 0.7 * mcSeries[0];
+            pLong[0] = 1.0 / (1 + Math.Exp(-z));
+            pShort[0] = 1 - pLong[0];
+
+            bool ready = CurrentBar - lastSignalBar > CooldownBars;
+
+            // Detección y gestión de señal
+            if (!signalActive)
+            {
+                if (ready && pLong[0] > LogisticThreshold)
+                    ActivateSignal(true);
+                else if (ready && pShort[0] > LogisticThreshold)
+                    ActivateSignal(false);
+            }
+            else
+            {
+                // Barra de entrada
+                if (CurrentBar == entryBarIndex)
+                    entryPrice = Open[0];
+
+                // Evaluar TP/SL
+                bool hitTP = signalIsLong ? High[0] >= tpPrice : Low[0] <= tpPrice;
+                bool hitSL = signalIsLong ? Low[0] <= slPrice : High[0] >= slPrice;
+                if (hitTP || hitSL)
+                {
+                    string result = hitTP ? "TP" : "SL";
+                    string output = string.Format(
+                        "{0}={1} - Señal {2:F2} Entrada={3:F2} - TP={4:F2} - SL={5:F2} - Resultado={6}",
+                        signalIsLong ? "LONG" : "SHORT",
+                        signalTime.ToString("HH:mm:ss"),
+                        signalPrice,
+                        entryPrice,
+                        tpPrice,
+                        slPrice,
+                        result);
+                    Print(output);
+                    lastSignalBar = CurrentBar;
+                    signalActive = false;
+                }
+            }
+        }
+
+        private void ActivateSignal(bool isLong)
+        {
+            signalActive = true;
+            signalIsLong = isLong;
+            signalBarIndex = CurrentBar;
+            signalTime = Time[0];
+            signalPrice = Close[0];
+            entryBarIndex = signalBarIndex + 1;
+
+            // Calcular precios de TP y SL
+            tpPrice = signalIsLong ? signalPrice + SignalPoints * TickSize : signalPrice - SignalPoints * TickSize;
+            slPrice = signalIsLong ? signalPrice - SignalPoints * TickSize : signalPrice + SignalPoints * TickSize;
+
+            // Dibujar flecha en la barra de señal
+            if (signalIsLong)
+                Draw.ArrowUp(this, "Long" + CurrentBar, false, 0, Low[0] - 2 * TickSize, ArrowUpBrush());
+            else
+                Draw.ArrowDown(this, "Short" + CurrentBar, false, 0, High[0] + 2 * TickSize, ArrowDownBrush());
+        }
+
+        private Brush ArrowUpBrush() => Brushes.Green;
+        private Brush ArrowDownBrush() => Brushes.Red;
+    }
+}
+
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private SuperIndicadorWickedFluxo[] cacheSuperIndicadorWickedFluxo;
+		public SuperIndicadorWickedFluxo SuperIndicadorWickedFluxo(int volumeWindow, int speedWindow, int cooldownBars, double logisticThreshold, int signalPoints)
+		{
+			return SuperIndicadorWickedFluxo(Input, volumeWindow, speedWindow, cooldownBars, logisticThreshold, signalPoints);
+		}
+
+		public SuperIndicadorWickedFluxo SuperIndicadorWickedFluxo(ISeries<double> input, int volumeWindow, int speedWindow, int cooldownBars, double logisticThreshold, int signalPoints)
+		{
+			if (cacheSuperIndicadorWickedFluxo != null)
+				for (int idx = 0; idx < cacheSuperIndicadorWickedFluxo.Length; idx++)
+					if (cacheSuperIndicadorWickedFluxo[idx] != null && cacheSuperIndicadorWickedFluxo[idx].VolumeWindow == volumeWindow && cacheSuperIndicadorWickedFluxo[idx].SpeedWindow == speedWindow && cacheSuperIndicadorWickedFluxo[idx].CooldownBars == cooldownBars && cacheSuperIndicadorWickedFluxo[idx].LogisticThreshold == logisticThreshold && cacheSuperIndicadorWickedFluxo[idx].SignalPoints == signalPoints && cacheSuperIndicadorWickedFluxo[idx].EqualsInput(input))
+						return cacheSuperIndicadorWickedFluxo[idx];
+			return CacheIndicator<SuperIndicadorWickedFluxo>(new SuperIndicadorWickedFluxo(){ VolumeWindow = volumeWindow, SpeedWindow = speedWindow, CooldownBars = cooldownBars, LogisticThreshold = logisticThreshold, SignalPoints = signalPoints }, input, ref cacheSuperIndicadorWickedFluxo);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.SuperIndicadorWickedFluxo SuperIndicadorWickedFluxo(int volumeWindow, int speedWindow, int cooldownBars, double logisticThreshold, int signalPoints)
+		{
+			return indicator.SuperIndicadorWickedFluxo(Input, volumeWindow, speedWindow, cooldownBars, logisticThreshold, signalPoints);
+		}
+
+		public Indicators.SuperIndicadorWickedFluxo SuperIndicadorWickedFluxo(ISeries<double> input , int volumeWindow, int speedWindow, int cooldownBars, double logisticThreshold, int signalPoints)
+		{
+			return indicator.SuperIndicadorWickedFluxo(input, volumeWindow, speedWindow, cooldownBars, logisticThreshold, signalPoints);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.SuperIndicadorWickedFluxo SuperIndicadorWickedFluxo(int volumeWindow, int speedWindow, int cooldownBars, double logisticThreshold, int signalPoints)
+		{
+			return indicator.SuperIndicadorWickedFluxo(Input, volumeWindow, speedWindow, cooldownBars, logisticThreshold, signalPoints);
+		}
+
+		public Indicators.SuperIndicadorWickedFluxo SuperIndicadorWickedFluxo(ISeries<double> input , int volumeWindow, int speedWindow, int cooldownBars, double logisticThreshold, int signalPoints)
+		{
+			return indicator.SuperIndicadorWickedFluxo(input, volumeWindow, speedWindow, cooldownBars, logisticThreshold, signalPoints);
+		}
+	}
+}
+
+#endregion

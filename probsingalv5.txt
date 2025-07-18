@@ -1,0 +1,172 @@
+using System;
+using System.Collections.Generic;
+using System.Windows.Media;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.Data;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.NinjaScript.DrawingTools;
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class ProbSignalPro_v5_Fluxo_Real : Indicator
+    {
+        private EMA ema;
+        private RSI rsi;
+        private ATR atr;
+        private double lastVolume = 0;
+        private double lastDelta = 0;
+        private int lastSignalBar = -1000;
+
+        private class SignalData
+        {
+            public int Bar;
+            public bool IsLong;
+            public double Entry;
+            public bool Done;
+        }
+        private List<SignalData> pending = new List<SignalData>();
+
+        [NinjaScriptProperty] public double Beta0 { get; set; } = -1.0;
+        [NinjaScriptProperty] public double BetaEMA { get; set; } = 0.6;
+        [NinjaScriptProperty] public double BetaRSI { get; set; } = 0.4;
+        [NinjaScriptProperty] public double BetaATR { get; set; } = -0.2;
+        [NinjaScriptProperty] public double BetaDist { get; set; } = 0.7;
+        [NinjaScriptProperty] public double BetaMom { get; set; } = 0.5;
+        [NinjaScriptProperty] public double BetaFluxo { get; set; } = 1.2;
+
+        [NinjaScriptProperty] public double MinProb { get; set; } = 0.75;
+        [NinjaScriptProperty] public int CooldownBars { get; set; } = 5;
+        [NinjaScriptProperty] public int TpTicks { get; set; } = 40;
+        [NinjaScriptProperty] public int SlTicks { get; set; } = 40;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = "ProbSignalPro v5 Fluxo Real: señales con probabilidad y presión institucional (fluxo), considerando la entrada real de la operación";
+                Name = "ProbSignalPro_v5_Fluxo_Real";
+                Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+                AddPlot(Brushes.Transparent, "Dummy");
+            }
+            else if (State == State.DataLoaded)
+            {
+                ema = EMA(14);
+                rsi = RSI(14, 1);
+                atr = ATR(14);
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 20) return;
+
+            double emaSlope = (ema[0] - ema[1]) / TickSize;
+            double rsiNorm = rsi[0] / 100.0;
+            double atrTicks = atr[0] / TickSize;
+            double distTicks = Math.Abs(Close[0] - ema[0]) / TickSize;
+            double momTicks = (Close[0] - Close[1]) / TickSize;
+            double fluxo = Math.Abs(Volume[0] - lastVolume) + Math.Abs((Close[0] - Open[0]) / TickSize);
+            lastVolume = Volume[0];
+
+            double lin = Beta0 + BetaEMA * emaSlope + BetaRSI * rsiNorm + BetaATR * atrTicks + BetaDist * distTicks + BetaMom * momTicks + BetaFluxo * fluxo;
+            double prob = 1 / (1 + Math.Exp(-lin));
+
+            bool isLong = prob >= MinProb && Close[0] > ema[0] && CurrentBar >= lastSignalBar + CooldownBars;
+            bool isShort = prob >= MinProb && Close[0] < ema[0] && CurrentBar >= lastSignalBar + CooldownBars;
+
+            if (isLong || isShort)
+            {
+                pending.Add(new SignalData
+                {
+                    Bar = CurrentBar,
+                    IsLong = isLong,
+                    Entry = Close[0], // Cambiar a Close[0] para entrada en la barra actual
+                    Done = false
+                });
+
+                lastSignalBar = CurrentBar;
+
+                if (isLong)
+                    Draw.TriangleUp(this, $"long_{CurrentBar}", false, 0, Low[0] - TickSize * 5, Brushes.Lime);
+                else
+                    Draw.TriangleDown(this, $"short_{CurrentBar}", false, 0, High[0] + TickSize * 5, Brushes.Fuchsia);
+            }
+
+            foreach (var sig in pending)
+            {
+                if (sig.Done || CurrentBar <= sig.Bar + 1) continue;
+                double tpTarget = sig.Entry + (sig.IsLong ? TpTicks : -TpTicks) * TickSize;
+                double slTarget = sig.Entry - (sig.IsLong ? SlTicks : -SlTicks) * TickSize;
+                bool tp = sig.IsLong ? High[0] >= tpTarget : Low[0] <= tpTarget;
+                bool sl = sig.IsLong ? Low[0] <= slTarget : High[0] >= slTarget;
+                if (tp || sl || CurrentBar >= sig.Bar + CooldownBars + 1)
+                {
+                    sig.Done = true;
+                    string result = tp ? "TP" : sl ? "SL" : "FLAT";
+                    // Imprimir resultados más precisos con entrada real
+                    Print($"{Time[sig.Bar]:HH:mm:ss} - {(sig.IsLong ? "LONG" : "SHORT")} - Prob={prob:P1} - Fluxo={fluxo:F2} - Entrada={sig.Entry:F2} - TP={tpTarget:F2} - SL={slTarget:F2} - Resultado={result}");
+                }
+            }
+        }
+    }
+}
+
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private ProbSignalPro_v5_Fluxo_Real[] cacheProbSignalPro_v5_Fluxo_Real;
+		public ProbSignalPro_v5_Fluxo_Real ProbSignalPro_v5_Fluxo_Real(double beta0, double betaEMA, double betaRSI, double betaATR, double betaDist, double betaMom, double betaFluxo, double minProb, int cooldownBars, int tpTicks, int slTicks)
+		{
+			return ProbSignalPro_v5_Fluxo_Real(Input, beta0, betaEMA, betaRSI, betaATR, betaDist, betaMom, betaFluxo, minProb, cooldownBars, tpTicks, slTicks);
+		}
+
+		public ProbSignalPro_v5_Fluxo_Real ProbSignalPro_v5_Fluxo_Real(ISeries<double> input, double beta0, double betaEMA, double betaRSI, double betaATR, double betaDist, double betaMom, double betaFluxo, double minProb, int cooldownBars, int tpTicks, int slTicks)
+		{
+			if (cacheProbSignalPro_v5_Fluxo_Real != null)
+				for (int idx = 0; idx < cacheProbSignalPro_v5_Fluxo_Real.Length; idx++)
+					if (cacheProbSignalPro_v5_Fluxo_Real[idx] != null && cacheProbSignalPro_v5_Fluxo_Real[idx].Beta0 == beta0 && cacheProbSignalPro_v5_Fluxo_Real[idx].BetaEMA == betaEMA && cacheProbSignalPro_v5_Fluxo_Real[idx].BetaRSI == betaRSI && cacheProbSignalPro_v5_Fluxo_Real[idx].BetaATR == betaATR && cacheProbSignalPro_v5_Fluxo_Real[idx].BetaDist == betaDist && cacheProbSignalPro_v5_Fluxo_Real[idx].BetaMom == betaMom && cacheProbSignalPro_v5_Fluxo_Real[idx].BetaFluxo == betaFluxo && cacheProbSignalPro_v5_Fluxo_Real[idx].MinProb == minProb && cacheProbSignalPro_v5_Fluxo_Real[idx].CooldownBars == cooldownBars && cacheProbSignalPro_v5_Fluxo_Real[idx].TpTicks == tpTicks && cacheProbSignalPro_v5_Fluxo_Real[idx].SlTicks == slTicks && cacheProbSignalPro_v5_Fluxo_Real[idx].EqualsInput(input))
+						return cacheProbSignalPro_v5_Fluxo_Real[idx];
+			return CacheIndicator<ProbSignalPro_v5_Fluxo_Real>(new ProbSignalPro_v5_Fluxo_Real(){ Beta0 = beta0, BetaEMA = betaEMA, BetaRSI = betaRSI, BetaATR = betaATR, BetaDist = betaDist, BetaMom = betaMom, BetaFluxo = betaFluxo, MinProb = minProb, CooldownBars = cooldownBars, TpTicks = tpTicks, SlTicks = slTicks }, input, ref cacheProbSignalPro_v5_Fluxo_Real);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.ProbSignalPro_v5_Fluxo_Real ProbSignalPro_v5_Fluxo_Real(double beta0, double betaEMA, double betaRSI, double betaATR, double betaDist, double betaMom, double betaFluxo, double minProb, int cooldownBars, int tpTicks, int slTicks)
+		{
+			return indicator.ProbSignalPro_v5_Fluxo_Real(Input, beta0, betaEMA, betaRSI, betaATR, betaDist, betaMom, betaFluxo, minProb, cooldownBars, tpTicks, slTicks);
+		}
+
+		public Indicators.ProbSignalPro_v5_Fluxo_Real ProbSignalPro_v5_Fluxo_Real(ISeries<double> input , double beta0, double betaEMA, double betaRSI, double betaATR, double betaDist, double betaMom, double betaFluxo, double minProb, int cooldownBars, int tpTicks, int slTicks)
+		{
+			return indicator.ProbSignalPro_v5_Fluxo_Real(input, beta0, betaEMA, betaRSI, betaATR, betaDist, betaMom, betaFluxo, minProb, cooldownBars, tpTicks, slTicks);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.ProbSignalPro_v5_Fluxo_Real ProbSignalPro_v5_Fluxo_Real(double beta0, double betaEMA, double betaRSI, double betaATR, double betaDist, double betaMom, double betaFluxo, double minProb, int cooldownBars, int tpTicks, int slTicks)
+		{
+			return indicator.ProbSignalPro_v5_Fluxo_Real(Input, beta0, betaEMA, betaRSI, betaATR, betaDist, betaMom, betaFluxo, minProb, cooldownBars, tpTicks, slTicks);
+		}
+
+		public Indicators.ProbSignalPro_v5_Fluxo_Real ProbSignalPro_v5_Fluxo_Real(ISeries<double> input , double beta0, double betaEMA, double betaRSI, double betaATR, double betaDist, double betaMom, double betaFluxo, double minProb, int cooldownBars, int tpTicks, int slTicks)
+		{
+			return indicator.ProbSignalPro_v5_Fluxo_Real(input, beta0, betaEMA, betaRSI, betaATR, betaDist, betaMom, betaFluxo, minProb, cooldownBars, tpTicks, slTicks);
+		}
+	}
+}
+
+#endregion

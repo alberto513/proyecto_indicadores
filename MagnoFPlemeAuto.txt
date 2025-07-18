@@ -1,0 +1,122 @@
+#region Using declarations
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using NinjaTrader.Cbi;
+using NinjaTrader.Gui.Tools;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript.Strategies;
+using NinjaTrader.NinjaScript.DrawingTools;
+using System.Windows.Media;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public class MagnoFPlemeAuto : Strategy
+    {
+        #region Parámetros configurables
+        [NinjaScriptProperty]
+        [Range(0.01, double.MaxValue), Display(Name = "Imbalance Mínimo", Order = 1, GroupName = "Validación")]
+        public double ImbalanceMinimo { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, int.MaxValue), Display(Name = "Volumen Mínimo", Order = 2, GroupName = "Validación")]
+        public int VolumenMinimo { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 50), Display(Name = "Lookback Ruptura", Order = 3, GroupName = "Validación")]
+        public int LookbackRuptura { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Solo Visual (sin operar)", Order = 4, GroupName = "General")]
+        public bool SoloVisual { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Usar Horario de Sesión", Order = 5, GroupName = "Horario")]
+        public bool UsarHorario { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Inicio Sesión (HHmm)", Order = 6, GroupName = "Horario")]
+        public int HoraInicio { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Fin Sesión (HHmm)", Order = 7, GroupName = "Horario")]
+        public int HoraFin { get; set; }
+        #endregion
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "MagnoFPlemeAuto";
+                Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+
+                // Valores por defecto
+                ImbalanceMinimo = 0.5;
+                VolumenMinimo = 500;
+                LookbackRuptura = 10;
+                SoloVisual = true;
+                UsarHorario = false;
+                HoraInicio = 930;
+                HoraFin = 1600;
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < LookbackRuptura + 1)
+                return;
+
+            if (BarsInProgress != 0)
+                return;
+
+            // Horario de sesión
+            if (UsarHorario)
+            {
+                int horaActual = ToTime(Time[0]);
+                if (horaActual < HoraInicio * 100 || horaActual > HoraFin * 100)
+                    return;
+            }
+
+            // Variables de la vela actual
+            double open = Open[0];
+            double close = Close[0];
+            double high = High[0];
+            double low = Low[0];
+            double cuerpo = Math.Abs(close - open);
+            double rango = high - low;
+            double imbalance = (rango == 0) ? 0 : cuerpo / rango;
+            double delta = close - open;
+            double volumen = Volume[0];
+
+            // Confirmaciones
+            bool volumenOk = volumen >= VolumenMinimo;
+            bool imbalanceOk = imbalance >= ImbalanceMinimo;
+            bool rupturaAlcista = Close[0] > MAX(High, LookbackRuptura)[1];
+            bool rupturaBajista = Close[0] < MIN(Low, LookbackRuptura)[1];
+
+            // Señal de compra
+            if (rupturaAlcista && delta > 0 && volumenOk && imbalanceOk)
+            {
+                Draw.ArrowUp(this, "etapa1long" + CurrentBar, true, 0, Low[0] - TickSize, Brushes.LimeGreen);
+                Print($"{Time[0]} | COMPRA | Δ: {delta:F2} | Vol: {volumen} | IMB: {imbalance:F2}");
+
+                if (!SoloVisual)
+                    EnterLong();
+            }
+
+            // Señal de venta
+            if (rupturaBajista && delta < 0 && volumenOk && imbalanceOk)
+            {
+                Draw.ArrowDown(this, "etapa1short" + CurrentBar, true, 0, High[0] + TickSize, Brushes.Red);
+                Print($"{Time[0]} | VENTA  | Δ: {delta:F2} | Vol: {volumen} | IMB: {imbalance:F2}");
+
+                if (!SoloVisual)
+                    EnterShort();
+            }
+        }
+    }
+}

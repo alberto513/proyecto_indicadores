@@ -1,0 +1,256 @@
+TESLA CON PIVOTES
+
+
+#region Using declarations
+using System;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Windows.Media;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.Core.FloatingPoint;
+using NinjaTrader.NinjaScript.DrawingTools;
+using NinjaTrader.NinjaScript.Indicators;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class Tesla369Simple : Indicator
+    {
+        private RSI rsi;
+        private EMA ema;
+        private ATR atr;
+        private int lastSignalBar = 0;
+
+        #region Propiedad para activar pivotes
+        [NinjaScriptProperty]
+        [Display(Name="Detectar Pivotes (tops/bottoms)", Description="Marca pivotes locales", Order=10, GroupName="Pivotes Renko")]
+        public bool DetectRenkoPivots { get; set; }
+        #endregion
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description        = "Tesla369 Indicator - Simplified con pivotes Renko";
+                Name               = "Tesla369Simple";
+                EMAPeriod          = 14;
+                CooldownBars       = 12;
+                RSIPeriod          = 14;
+                RSIOversold        = 30;
+                RSIOverbought      = 70;
+                ATRPeriod          = 3;
+                ATRMultiplier      = 0.75;
+                MinimumScore       = 75;
+                SignalDirection    = 0;  // 0=Both, 1=LongOnly, 2=ShortOnly
+                DetectRenkoPivots  = true;
+
+                Calculate              = Calculate.OnBarClose;
+                IsOverlay              = true;
+                DisplayInDataBox       = true;
+                DrawOnPricePanel       = true;
+                PaintPriceMarkers      = true;
+                ScaleJustification     = NinjaTrader.Gui.Chart.ScaleJustification.Right;
+                IsSuspendedWhileInactive = true;
+            }
+            else if (State == State.Configure)
+            {
+                // Plotear la EMA en gris, grosor por defecto
+                AddPlot(Brushes.Gray, "EMA");
+
+                // Si quisieras cambiar el grosor manualmente, podrías hacer:
+                // Plots[0].Pen.Thickness = 2;
+            }
+            else if (State == State.DataLoaded)
+            {
+                rsi = RSI(Close, RSIPeriod, 1);
+                ema = EMA(Close, EMAPeriod);
+                atr = ATR(ATRPeriod);
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < Math.Max(Math.Max(EMAPeriod, RSIPeriod), ATRPeriod))
+                return;
+
+            // 1) Lógica original Tesla369
+            Values[0][0] = ema[0];
+            double score = CalculateScore();
+            if ((SignalDirection == 0 || SignalDirection == 1) && IsValidLongSignal(score))
+                DrawLongSignal();
+            if ((SignalDirection == 0 || SignalDirection == 2) && IsValidShortSignal(score))
+                DrawShortSignal();
+
+            // 2) Detección de pivotes locales (tops/bottoms) sobre bricks (Renko)
+            if (DetectRenkoPivots && CurrentBar >= 2)
+            {
+                // Top local
+                if (High[1] > High[2] && High[1] > High[0])
+                    Draw.ArrowDown(this,
+                                   $"RenkoTop_{CurrentBar}",
+                                   false,
+                                   1,
+                                   High[1] + TickSize,
+                                   Brushes.Magenta);
+
+                // Bottom local
+                if (Low[1] < Low[2] && Low[1] < Low[0])
+                    Draw.ArrowUp(this,
+                                 $"RenkoBot_{CurrentBar}",
+                                 false,
+                                 1,
+                                 Low[1] - TickSize,
+                                 Brushes.Magenta);
+            }
+        }
+
+        #region Scoring y validación de señales
+        private double CalculateScore()
+        {
+            double score = 0;
+            if (rsi[0] < RSIOversold)    score += 25;
+            if (rsi[0] > RSIOverbought)  score -= 25;
+            if (Close[0] > ema[0])       score += 25;
+            if (Close[0] < ema[0])       score -= 25;
+            if (ema[0] > ema[1])         score += 25;
+            if (ema[0] < ema[1])         score -= 25;
+            if (Close[0] > Close[1])     score += 25;
+            if (Close[0] < Close[1])     score -= 25;
+            return Math.Abs(score);
+        }
+
+        private bool IsValidLongSignal(double score)
+        {
+            if (score < MinimumScore) return false;
+            if (lastSignalBar + CooldownBars > CurrentBar) return false;
+            return Close[0] > ema[0] && rsi[0] < RSIOverbought && Close[0] > Close[1];
+        }
+
+        private bool IsValidShortSignal(double score)
+        {
+            if (score < MinimumScore) return false;
+            if (lastSignalBar + CooldownBars > CurrentBar) return false;
+            return Close[0] < ema[0] && rsi[0] > RSIOversold && Close[0] < Close[1];
+        }
+
+        private void DrawLongSignal()
+        {
+            Draw.ArrowUp(this,
+                         $"Long_{CurrentBar}",
+                         false,
+                         0,
+                         Low[0] - atr[0] * ATRMultiplier,
+                         Brushes.LimeGreen);
+            lastSignalBar = CurrentBar;
+        }
+
+        private void DrawShortSignal()
+        {
+            Draw.ArrowDown(this,
+                           $"Short_{CurrentBar}",
+                           false,
+                           0,
+                           High[0] + atr[0] * ATRMultiplier,
+                           Brushes.Red);
+            lastSignalBar = CurrentBar;
+        }
+        #endregion
+
+        #region Propiedades
+        [Range(1, int.MaxValue), NinjaScriptProperty]
+        [Display(Name="EMA Period", Description="EMA Period", Order=1, GroupName="Parameters")]
+        public int EMAPeriod { get; set; }
+
+        [Range(1, int.MaxValue), NinjaScriptProperty]
+        [Display(Name="Cooldown Bars", Description="Bars between signals", Order=2, GroupName="Parameters")]
+        public int CooldownBars { get; set; }
+
+        [Range(1, int.MaxValue), NinjaScriptProperty]
+        [Display(Name="RSI Period", Description="RSI Period", Order=3, GroupName="Parameters")]
+        public int RSIPeriod { get; set; }
+
+        [Range(1, 100), NinjaScriptProperty]
+        [Display(Name="RSI Oversold", Description="RSI Oversold level", Order=4, GroupName="Parameters")]
+        public int RSIOversold { get; set; }
+
+        [Range(1, 100), NinjaScriptProperty]
+        [Display(Name="RSI Overbought", Description="RSI Overbought level", Order=5, GroupName="Parameters")]
+        public int RSIOverbought { get; set; }
+
+        [Range(1, int.MaxValue), NinjaScriptProperty]
+        [Display(Name="ATR Period", Description="ATR Period", Order=6, GroupName="Parameters")]
+        public int ATRPeriod { get; set; }
+
+        [Range(0.1, 10), NinjaScriptProperty]
+        [Display(Name="ATR Multiplier", Description="ATR Multiplier for signal placement", Order=7, GroupName="Parameters")]
+        public double ATRMultiplier { get; set; }
+
+        [Range(0, 100), NinjaScriptProperty]
+        [Display(Name="Minimum Score", Description="Minimum score required for signals", Order=8, GroupName="Parameters")]
+        public double MinimumScore { get; set; }
+
+        [Range(0, 2), NinjaScriptProperty]
+        [Display(Name="Signal Type", Description="Signal Type (0=Both, 1=LongOnly, 2=ShortOnly)", Order=9, GroupName="Parameters")]
+        public int SignalDirection { get; set; }
+        #endregion
+    }
+}
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private Tesla369Simple[] cacheTesla369Simple;
+		public Tesla369Simple Tesla369Simple(bool detectRenkoPivots, int eMAPeriod, int cooldownBars, int rSIPeriod, int rSIOversold, int rSIOverbought, int aTRPeriod, double aTRMultiplier, double minimumScore, int signalDirection)
+		{
+			return Tesla369Simple(Input, detectRenkoPivots, eMAPeriod, cooldownBars, rSIPeriod, rSIOversold, rSIOverbought, aTRPeriod, aTRMultiplier, minimumScore, signalDirection);
+		}
+
+		public Tesla369Simple Tesla369Simple(ISeries<double> input, bool detectRenkoPivots, int eMAPeriod, int cooldownBars, int rSIPeriod, int rSIOversold, int rSIOverbought, int aTRPeriod, double aTRMultiplier, double minimumScore, int signalDirection)
+		{
+			if (cacheTesla369Simple != null)
+				for (int idx = 0; idx < cacheTesla369Simple.Length; idx++)
+					if (cacheTesla369Simple[idx] != null && cacheTesla369Simple[idx].DetectRenkoPivots == detectRenkoPivots && cacheTesla369Simple[idx].EMAPeriod == eMAPeriod && cacheTesla369Simple[idx].CooldownBars == cooldownBars && cacheTesla369Simple[idx].RSIPeriod == rSIPeriod && cacheTesla369Simple[idx].RSIOversold == rSIOversold && cacheTesla369Simple[idx].RSIOverbought == rSIOverbought && cacheTesla369Simple[idx].ATRPeriod == aTRPeriod && cacheTesla369Simple[idx].ATRMultiplier == aTRMultiplier && cacheTesla369Simple[idx].MinimumScore == minimumScore && cacheTesla369Simple[idx].SignalDirection == signalDirection && cacheTesla369Simple[idx].EqualsInput(input))
+						return cacheTesla369Simple[idx];
+			return CacheIndicator<Tesla369Simple>(new Tesla369Simple(){ DetectRenkoPivots = detectRenkoPivots, EMAPeriod = eMAPeriod, CooldownBars = cooldownBars, RSIPeriod = rSIPeriod, RSIOversold = rSIOversold, RSIOverbought = rSIOverbought, ATRPeriod = aTRPeriod, ATRMultiplier = aTRMultiplier, MinimumScore = minimumScore, SignalDirection = signalDirection }, input, ref cacheTesla369Simple);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.Tesla369Simple Tesla369Simple(bool detectRenkoPivots, int eMAPeriod, int cooldownBars, int rSIPeriod, int rSIOversold, int rSIOverbought, int aTRPeriod, double aTRMultiplier, double minimumScore, int signalDirection)
+		{
+			return indicator.Tesla369Simple(Input, detectRenkoPivots, eMAPeriod, cooldownBars, rSIPeriod, rSIOversold, rSIOverbought, aTRPeriod, aTRMultiplier, minimumScore, signalDirection);
+		}
+
+		public Indicators.Tesla369Simple Tesla369Simple(ISeries<double> input , bool detectRenkoPivots, int eMAPeriod, int cooldownBars, int rSIPeriod, int rSIOversold, int rSIOverbought, int aTRPeriod, double aTRMultiplier, double minimumScore, int signalDirection)
+		{
+			return indicator.Tesla369Simple(input, detectRenkoPivots, eMAPeriod, cooldownBars, rSIPeriod, rSIOversold, rSIOverbought, aTRPeriod, aTRMultiplier, minimumScore, signalDirection);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.Tesla369Simple Tesla369Simple(bool detectRenkoPivots, int eMAPeriod, int cooldownBars, int rSIPeriod, int rSIOversold, int rSIOverbought, int aTRPeriod, double aTRMultiplier, double minimumScore, int signalDirection)
+		{
+			return indicator.Tesla369Simple(Input, detectRenkoPivots, eMAPeriod, cooldownBars, rSIPeriod, rSIOversold, rSIOverbought, aTRPeriod, aTRMultiplier, minimumScore, signalDirection);
+		}
+
+		public Indicators.Tesla369Simple Tesla369Simple(ISeries<double> input , bool detectRenkoPivots, int eMAPeriod, int cooldownBars, int rSIPeriod, int rSIOversold, int rSIOverbought, int aTRPeriod, double aTRMultiplier, double minimumScore, int signalDirection)
+		{
+			return indicator.Tesla369Simple(input, detectRenkoPivots, eMAPeriod, cooldownBars, rSIPeriod, rSIOversold, rSIOverbought, aTRPeriod, aTRMultiplier, minimumScore, signalDirection);
+		}
+	}
+}
+
+#endregion

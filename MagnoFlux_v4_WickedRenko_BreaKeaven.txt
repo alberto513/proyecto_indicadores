@@ -1,0 +1,259 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.IO;
+using NinjaTrader.Cbi;
+using NinjaTrader.Data;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Gui.SuperDom;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.Strategies;
+using NinjaTrader.NinjaScript.DrawingTools;
+using System.Windows.Media;
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public class MagnoFlux_v4_WickedRenko_Only : Strategy
+    {
+        #region Parameters
+        [NinjaScriptProperty]
+        [Display(Name = "RenkoSize", Order = 1, GroupName = "Parameters")]
+        [Range(1, int.MaxValue, ErrorMessage = "RenkoSize must be positive")]
+        public int RenkoSize { get; set; } = 30;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ProfitTargetTicks", Order = 2, GroupName = "Parameters")]
+        [Range(1, int.MaxValue, ErrorMessage = "ProfitTargetTicks must be positive")]
+        public int ProfitTargetTicks { get; set; } = 40; // 10 puntos NQ
+
+        [NinjaScriptProperty]
+        [Display(Name = "StopLossTicks", Order = 3, GroupName = "Parameters")]
+        [Range(1, int.MaxValue, ErrorMessage = "StopLossTicks must be positive")]
+        public int StopLossTicks { get; set; } = 40; // 10 puntos NQ
+
+        [NinjaScriptProperty]
+        [Display(Name = "EnableLogging", Order = 4, GroupName = "Parameters")]
+        public bool EnableLogging { get; set; } = true;
+
+        [NinjaScriptProperty]
+        [Display(Name = "LookbackSignals", Order = 5, GroupName = "Hertz")]
+        [Range(2, int.MaxValue, ErrorMessage = "LookbackSignals must be >= 2")]
+        public int LookbackSignals { get; set; } = 10;
+
+        [NinjaScriptProperty]
+        [Display(Name = "EnableHzLogging", Order = 6, GroupName = "Hertz")]
+        public bool EnableHzLogging { get; set; } = false;
+
+        [NinjaScriptProperty]
+        [Display(Name = "CsvFileName", Order = 7, GroupName = "Hertz")]
+        public string CsvFileName { get; set; } = "HertzTuner.csv";
+
+        #endregion
+
+        private double entryPrice;
+        private double stopPrice;
+        private int entryBar;
+        private bool movedToBreakeven;
+
+        private SMA volumeSma;
+        private Momentum momentum;
+
+        private readonly List<DateTime> signalTimes = new List<DateTime>();
+        private double currentHz;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "MagnoFlux_v4_WickedRenko_Only";
+                Calculate = Calculate.OnBarClose;
+                EntriesPerDirection = 1;
+                EntryHandling = EntryHandling.AllEntries;
+                IsExitOnSessionCloseStrategy = true;
+                IncludeCommission = true;
+            }
+            else if (State == State.DataLoaded)
+            {
+                volumeSma = SMA(Volume, 5);
+                momentum = Momentum(14);
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < Math.Max(volumeSma.Period, momentum.Period))
+                return;
+
+            if (Position.MarketPosition == MarketPosition.Flat)
+            {
+                if (IsValidLongSignal())
+                {
+                    LogHertz(Time[0]);
+                    if (EnableLogging)
+                        Print($"SIGNAL=Long HZ={currentHz:F4} CONFIRM={Time[0]} TP={Close[0] + ProfitTargetTicks * TickSize} SL={Close[0] - StopLossTicks * TickSize}");
+                    Draw.TriangleUp(this, "LongSignal" + CurrentBar, false, 0, Low[0] - 2 * TickSize, Brushes.Lime);
+                    EnterLong("LongEntry");
+                }
+                else if (IsValidShortSignal())
+                {
+                    LogHertz(Time[0]);
+                    if (EnableLogging)
+                        Print($"SIGNAL=Short HZ={currentHz:F4} CONFIRM={Time[0]} TP={Close[0] - ProfitTargetTicks * TickSize} SL={Close[0] + StopLossTicks * TickSize}");
+                    Draw.TriangleDown(this, "ShortSignal" + CurrentBar, false, 0, High[0] + 2 * TickSize, Brushes.Red);
+                    EnterShort("ShortEntry");
+                }
+            }
+            else
+            {
+                ManagePosition();
+            }
+
+            // ---- COLORES INSTITUCIONALES EN EL PANEL ----
+            Brush displayColor = Brushes.Gray;
+            if (currentHz >= 0.01 && currentHz <= 0.2)
+                displayColor = Brushes.Lime;      // VERDE institucional (prender)
+            else if ((currentHz >= 0.005 && currentHz < 0.01) || (currentHz > 0.2 && currentHz <= 0.5))
+                displayColor = Brushes.Gold;      // AMARILLO (operar con cautela)
+            else
+                displayColor = Brushes.Red;       // ROJO (no operar)
+
+            Draw.TextFixed(this, "HertzDisplay", $"Hz: {currentHz:F4}", TextPosition.TopRight, displayColor, new Gui.Tools.SimpleFont("Arial", 16), Brushes.Transparent, Brushes.Transparent, 0);
+        }
+
+        protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
+        {
+            if (execution.Order.OrderState == OrderState.Filled &&
+                (execution.Order.Name == "LongEntry" || execution.Order.Name == "ShortEntry"))
+            {
+                entryPrice = execution.Price;
+                entryBar = CurrentBar;
+                movedToBreakeven = false;
+                if (execution.Order.Name == "LongEntry")
+                    stopPrice = entryPrice - StopLossTicks * TickSize;
+                else
+                    stopPrice = entryPrice + StopLossTicks * TickSize;
+            }
+        }
+
+        private bool IsValidLongSignal()
+        {
+            if (Close[0] <= Open[0])
+                return false;
+
+            double body = Math.Abs(Close[0] - Open[0]);
+            double range = High[0] - Low[0];
+            if (body / range < 0.5)
+                return false;
+
+            if (Volume[0] < volumeSma[0])
+                return false;
+
+            return momentum[0] > 0;
+        }
+
+        private bool IsValidShortSignal()
+        {
+            if (Close[0] >= Open[0])
+                return false;
+
+            double body = Math.Abs(Close[0] - Open[0]);
+            double range = High[0] - Low[0];
+            if (body / range < 0.5)
+                return false;
+
+            if (Volume[0] < volumeSma[0])
+                return false;
+
+            return momentum[0] < 0;
+        }
+
+        private void ManagePosition()
+        {
+            if (!movedToBreakeven && CurrentBar > entryBar)
+            {
+                if (Position.MarketPosition == MarketPosition.Long && Close[0] > entryPrice)
+                {
+                    stopPrice = entryPrice; // move stop to breakeven after first favorable close
+                    movedToBreakeven = true;
+                    if (EnableLogging)
+                        Print($"Stop moved to breakeven at {stopPrice}");
+                }
+                else if (Position.MarketPosition == MarketPosition.Short && Close[0] < entryPrice)
+                {
+                    stopPrice = entryPrice;
+                    movedToBreakeven = true;
+                    if (EnableLogging)
+                        Print($"Stop moved to breakeven at {stopPrice}");
+                }
+            }
+
+            if (Position.MarketPosition == MarketPosition.Long)
+            {
+                double target = entryPrice + ProfitTargetTicks * TickSize;
+                if (High[0] >= target)
+                {
+                    ExitLong("TP", "");
+                    if (EnableLogging)
+                        Print($"TP hit at {Close[0]} (target {target})");
+                }
+                else if (Low[0] <= stopPrice)
+                {
+                    ExitLong("SL", "");
+                    if (EnableLogging)
+                        Print($"SL hit at {Close[0]} (stop {stopPrice})");
+                }
+            }
+            else if (Position.MarketPosition == MarketPosition.Short)
+            {
+                double target = entryPrice - ProfitTargetTicks * TickSize;
+                if (Low[0] <= target)
+                {
+                    ExitShort("TP", "");
+                    if (EnableLogging)
+                        Print($"TP hit at {Close[0]} (target {target})");
+                }
+                else if (High[0] >= stopPrice)
+                {
+                    ExitShort("SL", "");
+                    if (EnableLogging)
+                        Print($"SL hit at {Close[0]} (stop {stopPrice})");
+                }
+            }
+        }
+
+        private void LogHertz(DateTime time)
+        {
+            signalTimes.Add(time);
+            if (signalTimes.Count > LookbackSignals)
+                signalTimes.RemoveAt(0);
+
+            if (signalTimes.Count >= 2)
+            {
+                double totalSeconds = 0;
+                for (int i = 1; i < signalTimes.Count; i++)
+                {
+                    totalSeconds += (signalTimes[i] - signalTimes[i - 1]).TotalSeconds;
+                }
+                double avgSeconds = totalSeconds / (signalTimes.Count - 1);
+                if (avgSeconds > 0)
+                {
+                    currentHz = 1.0 / avgSeconds;
+                }
+            }
+
+            if (EnableHzLogging)
+            {
+                string logLine = $"{time:yyyy-MM-dd HH:mm:ss},{currentHz:F6}";
+                Print(logLine);
+                try
+                {
+                    File.AppendAllText(CsvFileName, logLine + Environment.NewLine);
+                }
+                catch { }
+            }
+        }
+    }
+}

@@ -1,0 +1,120 @@
+
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using NinjaTrader.Cbi;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Strategies;
+using NinjaTrader.NinjaScript.Indicators;
+using System.Windows.Media;
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public class MagnoTest_LimitRange : Strategy
+    {
+        [NinjaScriptProperty]
+        [Range(10, 50), Display(Name = "RangeSize", Order = 1)]
+        public int RangeSize { get; set; } = 20;
+
+        [NinjaScriptProperty]
+        [Range(1, int.MaxValue), Display(Name = "ProfitTargetTicks", Order = 2)]
+        public int ProfitTargetTicks { get; set; } = 40;
+
+        [NinjaScriptProperty]
+        [Range(1, int.MaxValue), Display(Name = "StopLossTicks", Order = 3)]
+        public int StopLossTicks { get; set; } = 45;
+
+        private double entryPrice = 0;
+        private double boxSize = 0;
+        private Order pendingEntry = null;
+        private int cancelBar = 0;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "MagnoTest_LimitRange";
+                Calculate = Calculate.OnEachTick;
+                EntriesPerDirection = 1;
+                EntryHandling = EntryHandling.AllEntries;
+                IsExitOnSessionCloseStrategy = true;
+                IncludeCommission = true;
+                BarsPeriod = new BarsPeriod { BarsPeriodType = BarsPeriodType.Range, Value = RangeSize };
+            }
+            else if (State == State.Configure)
+            {
+                BarsPeriod.Value = RangeSize;
+            }
+            else if (State == State.DataLoaded)
+            {
+                boxSize = BarsPeriod.Value * TickSize;
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 2) return;
+
+            if (pendingEntry != null && CurrentBar >= cancelBar && IsFirstTickOfBar)
+            {
+                CancelOrder(pendingEntry);
+                pendingEntry = null;
+            }
+
+            if (Position.MarketPosition == MarketPosition.Flat && pendingEntry == null)
+            {
+                double body = Math.Abs(Close[0] - Open[0]);
+                double range = High[0] - Low[0];
+
+                if (body / range >= 0.5)
+                {
+                    if (Close[0] > Open[0]) // vela alcista fuerte
+                    {
+                        double limitPrice = Open[1] - boxSize;
+                        pendingEntry = EnterLongLimit(1, limitPrice, "L");
+                        cancelBar = CurrentBar + 2;
+                    }
+                    else if (Close[0] < Open[0]) // vela bajista fuerte
+                    {
+                        double limitPrice = Open[1] + boxSize;
+                        pendingEntry = EnterShortLimit(1, limitPrice, "S");
+                        cancelBar = CurrentBar + 2;
+                    }
+                }
+            }
+
+            if (Position.MarketPosition != MarketPosition.Flat)
+            {
+                double target = entryPrice + (Position.MarketPosition == MarketPosition.Long ? ProfitTargetTicks : -ProfitTargetTicks) * TickSize;
+                double stop = entryPrice - (Position.MarketPosition == MarketPosition.Long ? StopLossTicks : -StopLossTicks) * TickSize;
+
+                if (Position.MarketPosition == MarketPosition.Long)
+                {
+                    if (High[0] >= target)
+                        ExitLong("TP", "");
+                    else if (Low[0] <= stop)
+                        ExitLong("SL", "");
+                }
+                else if (Position.MarketPosition == MarketPosition.Short)
+                {
+                    if (Low[0] <= target)
+                        ExitShort("TP", "");
+                    else if (High[0] >= stop)
+                        ExitShort("SL", "");
+                }
+            }
+        }
+
+        protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
+        {
+            if (execution.Order != null && execution.Order.OrderState == OrderState.Filled &&
+                (execution.Order.Name == "L" || execution.Order.Name == "S"))
+            {
+                entryPrice = execution.Price;
+                pendingEntry = null;
+            }
+        }
+    }
+}

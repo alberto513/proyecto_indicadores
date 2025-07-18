@@ -1,0 +1,129 @@
+#region Using declarations
+using System;
+using System.Windows.Media;
+using NinjaTrader.Cbi;
+using NinjaTrader.Data;
+using NinjaTrader.Gui.Tools;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Strategies;
+using NinjaTrader.NinjaScript.DrawingTools;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public class MagnoFluxScalperStrategyMarketDebug : Strategy
+    {
+        #region Properties
+        [NinjaScriptProperty] public int     StopLossTicks       { get; set; } = 40;
+        [NinjaScriptProperty] public int     ProfitTargetTicks   { get; set; } = 44;
+        [NinjaScriptProperty] public int     CooldownBars        { get; set; } = 1;
+        [NinjaScriptProperty] public int     MinConditions       { get; set; } = 2;
+        [NinjaScriptProperty] public double  VolumeThreshold     { get; set; } = 1.3;
+        [NinjaScriptProperty] public int     SpeedTicks          { get; set; } = 18;
+        [NinjaScriptProperty] public double  BodyContextRatio    { get; set; } = 0.3;
+        [NinjaScriptProperty] public double  SlopeMin            { get; set; } = 0.03;
+        [NinjaScriptProperty] public string  SessionStart        { get; set; } = "10:30";
+        [NinjaScriptProperty] public string  SessionEnd          { get; set; } = "13:00";
+        #endregion
+
+        private int     lastSignalBar = -1000;
+        private int     tradesToday   = 0;
+        private DateTime lastDate     = Core.Globals.MinDate;
+        private TimeSpan sessionStart, sessionEnd;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name                          = "MagnoFluxScalperStrategyMarketDebug";
+                Calculate                     = Calculate.OnEachTick;
+                EntriesPerDirection           = 1;
+                EntryHandling                 = EntryHandling.AllEntries;
+                IsExitOnSessionCloseStrategy  = true;
+                ExitOnSessionCloseSeconds     = 30;
+
+                StopLossTicks     = 40;
+                ProfitTargetTicks = 44;
+                CooldownBars      = 1;
+                MinConditions     = 2;
+                VolumeThreshold   = 1.3;
+                SpeedTicks        = 18;
+                BodyContextRatio  = 0.3;
+                SlopeMin          = 0.03;
+                SessionStart      = "10:30";
+                SessionEnd        = "13:00";
+            }
+            else if (State == State.Configure)
+            {
+                SetStopLoss(CalculationMode.Ticks, StopLossTicks);
+                SetProfitTarget(CalculationMode.Ticks, ProfitTargetTicks);
+
+                TimeSpan.TryParse(SessionStart, out sessionStart);
+                TimeSpan.TryParse(SessionEnd,   out sessionEnd);
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            // Debug output
+            Print($"Bar#{CurrentBar} Time:{Time[0]:HH:mm:ss} Pos:{Position.MarketPosition} TradesToday:{tradesToday}");
+
+            // Reset daily count
+            if (Bars.IsFirstBarOfSession && Time[0].Date != lastDate)
+            {
+                tradesToday = 0;
+                lastDate    = Time[0].Date;
+                Print(">> New session, reset tradesToday");
+            }
+
+            // 1) History & cooldown
+            if (CurrentBar < 20 || CurrentBar <= lastSignalBar + CooldownBars)
+            {
+                Print(" Skip: minBars or cooldown");
+                return;
+            }
+
+            // 2) Session filter
+            var now = Time[0].TimeOfDay;
+            if (now < sessionStart || now > sessionEnd)
+            {
+                Print($" Skip: outside session {now}");
+                return;
+            }
+
+            // 3) Condition counting
+            double avgVol   = SMA(Volume, 10)[0];
+            bool volSpike   = Volume[0] > avgVol * VolumeThreshold;
+            bool speedOk    = Math.Abs(Close[0] - Close[2]) / TickSize >= SpeedTicks;
+            double body     = Math.Abs(Close[0] - Open[0]);
+            double range    = High[0] - Low[0];
+            bool contextOk  = range > 0 && body > range * BodyContextRatio;
+            int count       = (volSpike?1:0) + (speedOk?1:0) + (contextOk?1:0);
+
+            double slope    = (EMA(14)[0] - EMA(14)[3]) / (3 * TickSize);
+            bool upTrend    = slope > SlopeMin;
+
+            Print($" Conds: vol={volSpike} speed={speedOk} ctx={contextOk} count={count}/{MinConditions} trendUp={upTrend}");
+
+            // 4) Entry
+            if (Position.MarketPosition == MarketPosition.Flat 
+                && upTrend 
+                && count >= MinConditions 
+                && Close[0] > Open[0])
+            {
+                EnterLong(1, "LongTest");
+                lastSignalBar = CurrentBar;
+                tradesToday++;
+                Draw.ArrowUp(this, "LongA" + CurrentBar, false, 0, Low[0] - TickSize, Brushes.Lime);
+                Print($"*** EnterLong Market @ {Close[0]:F2}");
+            }
+        }
+
+        protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity,
+                                                  MarketPosition marketPosition, string orderId, DateTime time)
+        {
+            if (execution.Order?.OrderState == OrderState.Filled)
+                Print($"*** Filled {execution.Order.Name} @ {price:F2} qty:{quantity}");
+        }
+    }
+}

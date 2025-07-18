@@ -1,0 +1,154 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Linq;
+using NinjaTrader.Cbi;
+using NinjaTrader.Data;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Gui.SuperDom;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.Strategies;
+using NinjaTrader.NinjaScript.DrawingTools;
+using System.Windows.Media;
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public class MagnoFlux_v4_WickedRenko_Only : Strategy
+    {
+        #region Parameters
+        [NinjaScriptProperty]
+        [Display(Name = "RenkoSize", Order = 1, GroupName = "Parameters")]
+        public int RenkoSize { get; set; } = 30;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ProfitTargetTicks", Order = 2, GroupName = "Parameters")]
+        public int ProfitTargetTicks { get; set; } = 12;
+
+        [NinjaScriptProperty]
+        [Display(Name = "StopLossTicks", Order = 3, GroupName = "Parameters")]
+        public int StopLossTicks { get; set; } = 8;
+        #endregion
+
+        private double entryPrice;
+        private int entryBar;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "MagnoFlux_v4_WickedRenko_Only";
+                Calculate = Calculate.OnBarClose;
+                EntriesPerDirection = 1;
+                EntryHandling = EntryHandling.AllEntries;
+                IsExitOnSessionCloseStrategy = true;
+                IncludeCommission = true;
+            }
+            // IMPORTANTE: No uses AddRenko(). Asegurate de aplicar esta estrategia a un gráfico configurado manualmente como Wicked Renko.
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 20)
+                return;
+
+            if (Position.MarketPosition == MarketPosition.Flat)
+            {
+                if (IsValidLongSignal())
+                {
+                    entryBar = CurrentBar + 1;
+                    entryPrice = Close[0];
+                    Print($"SIGNAL=Long CONFIRM={Time[0]} TP en {entryPrice + ProfitTargetTicks * TickSize} SL en {entryPrice - StopLossTicks * TickSize}");
+                    Draw.TriangleUp(this, "LongSignal" + CurrentBar, false, 0, Low[0] - 2 * TickSize, Brushes.Lime);
+                    EnterLong();
+                }
+                else if (IsValidShortSignal())
+                {
+                    entryBar = CurrentBar + 1;
+                    entryPrice = Close[0];
+                    Print($"SIGNAL=Short CONFIRM={Time[0]} TP en {entryPrice - ProfitTargetTicks * TickSize} SL en {entryPrice + StopLossTicks * TickSize}");
+                    Draw.TriangleDown(this, "ShortSignal" + CurrentBar, false, 0, High[0] + 2 * TickSize, Brushes.Red);
+                    EnterShort();
+                }
+            }
+            else
+            {
+                ManagePosition();
+            }
+        }
+
+        private bool IsValidLongSignal()
+        {
+            if (Close[0] <= Open[0])
+                return false;
+
+            double body = Math.Abs(Close[0] - Open[0]);
+            double range = High[0] - Low[0];
+            if (body / range < 0.5)
+                return false;
+
+            if (Volume[0] < SMA(Volume, 5)[0])
+                return false;
+
+            return MomentumCheck(true);
+        }
+
+        private bool IsValidShortSignal()
+        {
+            if (Close[0] >= Open[0])
+                return false;
+
+            double body = Math.Abs(Close[0] - Open[0]);
+            double range = High[0] - Low[0];
+            if (body / range < 0.5)
+                return false;
+
+            if (Volume[0] < SMA(Volume, 5)[0])
+                return false;
+
+            return MomentumCheck(false);
+        }
+
+        private bool MomentumCheck(bool longSignal)
+        {
+            double mom = Momentum(14)[0];
+            return longSignal ? mom > 0 : mom < 0;
+        }
+
+        private void ManagePosition()
+        {
+            if (Position.MarketPosition == MarketPosition.Long)
+            {
+                double target = entryPrice + ProfitTargetTicks * TickSize;
+                double stop = entryPrice - StopLossTicks * TickSize;
+                if (High[0] >= target)
+                {
+                    ExitLong("TP", "");
+                    Print($"TP hit at {target}");
+                }
+                else if (Low[0] <= stop)
+                {
+                    ExitLong("SL", "");
+                    Print($"SL hit at {stop}");
+                }
+            }
+            else if (Position.MarketPosition == MarketPosition.Short)
+            {
+                double target = entryPrice - ProfitTargetTicks * TickSize;
+                double stop = entryPrice + StopLossTicks * TickSize;
+                if (Low[0] <= target)
+                {
+                    ExitShort("TP", "");
+                    Print($"TP hit at {target}");
+                }
+                else if (High[0] >= stop)
+                {
+                    ExitShort("SL", "");
+                    Print($"SL hit at {stop}");
+                }
+            }
+        }
+    }
+}

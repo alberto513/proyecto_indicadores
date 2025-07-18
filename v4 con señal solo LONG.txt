@@ -1,0 +1,280 @@
+v4 con señal solo LONG
+#region Using declarations
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Windows.Media;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.Core.FloatingPoint;
+using NinjaTrader.NinjaScript.DrawingTools;
+using NinjaTrader.NinjaScript.Indicators;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class SmartWickedRenkoV4Pro : Indicator
+    {
+        private Series<double> rsiValues;
+        private EMA ema;
+        private ATR atr;
+        private string lastSignalType = "";
+        private Series<double> trendStrength;
+        private Series<double> volatilityScore;
+        private Series<double> momentumScore;
+      
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = "Smart Wicked Renko V4 Pro - Enhanced Version";
+                Name = "SmartWickedRenkoV4Pro";
+                EMAPeriod = 14;
+                CooldownBars = 12;
+                RSIPeriod = 14;
+                RSISmoothPeriod = 3;  // Nuevo parámetro para smooth
+                RSIOversold = 30;
+                RSIOverbought = 70;
+                ATRPeriod = 3;
+                ATRMultiplier = 0.75;
+                MinimumScore = 65;
+                SignalDirection = 0;
+                ShowDebug = true;
+              
+                Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+                DisplayInDataBox = true;
+                DrawOnPricePanel = true;
+                DrawHorizontalGridLines = true;
+                DrawVerticalGridLines = true;
+                PaintPriceMarkers = true;
+                ScaleJustification = NinjaTrader.Gui.Chart.ScaleJustification.Right;
+                IsSuspendedWhileInactive = true;
+            }
+            else if (State == State.Configure)
+            {
+                AddPlot(new Stroke(Brushes.Gray, 2), PlotStyle.Line, "EMA");
+              
+                // Inicialización de series
+                rsiValues = new Series<double>(this);
+                trendStrength = new Series<double>(this);
+                volatilityScore = new Series<double>(this);
+                momentumScore = new Series<double>(this);
+              
+                ema = EMA(Close, EMAPeriod);
+                atr = ATR(ATRPeriod);
+            }
+            else if (State == State.DataLoaded)
+            {
+                if (ShowDebug)
+                    Print("SmartWickedRenkoV4Pro: Indicator initialized successfully");
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            try
+            {
+                if (CurrentBar < Math.Max(Math.Max(EMAPeriod, RSIPeriod), ATRPeriod))
+                    return;
+
+                // Cálculo del RSI usando la sintaxis correcta
+                rsiValues[0] = RSI(Close, RSIPeriod, RSISmoothPeriod)[0];
+
+                if (ShowDebug)
+                {
+                    Print($"Bar: {CurrentBar} | Close: {Close[0]} | RSI: {rsiValues[0]:F2} | EMA: {ema[0]:F2}");
+                }
+
+                // Cálculo de scores dinámicos
+                CalculateScores();
+              
+                double totalScore = CalculateTotalScore();
+
+                if (ShowDebug)
+                {
+                    Print($"Total Score: {totalScore:F2} | Trend: {trendStrength[0]:F2} | Volatility: {volatilityScore[0]:F2} | Momentum: {momentumScore[0]:F2}");
+                }
+
+                if ((SignalDirection == 0 || SignalDirection == 1) && IsValidLongSignal(totalScore))
+                {
+                    if (lastSignalType != "LONG" || CurrentBar - LastSignalBar > CooldownBars)
+                    {
+                        DrawLongSignal(totalScore);
+                        lastSignalType = "LONG";
+                    }
+                }
+              
+                if ((SignalDirection == 0 || SignalDirection == 2) && IsValidShortSignal(totalScore))
+                {
+                    if (lastSignalType != "SHORT" || CurrentBar - LastSignalBar > CooldownBars)
+                    {
+                        DrawShortSignal(totalScore);
+                        lastSignalType = "SHORT";
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                if (ShowDebug)
+                    Print($"Error in OnBarUpdate: {e.Message}");
+            }
+        }
+
+        private void CalculateScores()
+        {
+            // Trend Strength (0-100)
+            trendStrength[0] = Math.Min(100, Math.Max(0, 
+                50 + (Close[0] > ema[0] ? 1 : -1) * 
+                Math.Min(50, Math.Abs(Close[0] - ema[0]) / atr[0] * 25)));
+
+            // Volatility Score (0-100)
+            volatilityScore[0] = Math.Min(100, atr[0] / (atr[1] > 0 ? atr[1] : 1) * 50);
+
+            // Momentum Score (0-100)
+            momentumScore[0] = Math.Min(100, Math.Abs(Close[0] - Close[1]) / atr[0] * 50);
+        }
+
+        private double CalculateTotalScore()
+        {
+            return (trendStrength[0] * 0.5 + 
+                    volatilityScore[0] * 0.3 + 
+                    momentumScore[0] * 0.2);
+        }
+
+        private bool IsValidLongSignal(double score)
+        {
+            if (score < MinimumScore) return false;
+            if (LastSignalBar + CooldownBars > CurrentBar) return false;
+          
+            bool priceAboveEma = Close[0] > ema[0];
+            bool notOverbought = rsiValues[0] < RSIOverbought;
+            bool priceIncreasing = Close[0] > Close[1];
+            bool strongTrend = trendStrength[0] > 60;
+            bool goodVolatility = volatilityScore[0] > 40;
+          
+            return priceAboveEma && notOverbought && priceIncreasing && strongTrend && goodVolatility;
+        }
+
+        private bool IsValidShortSignal(double score)
+        {
+            if (score < MinimumScore) return false;
+            if (LastSignalBar + CooldownBars > CurrentBar) return false;
+          
+            bool priceBelowEma = Close[0] < ema[0];
+            bool notOversold = rsiValues[0] > RSIOversold;
+            bool priceDecreasing = Close[0] < Close[1];
+            bool strongTrend = trendStrength[0] > 60;
+            bool goodVolatility = volatilityScore[0] > 40;
+          
+            return priceBelowEma && notOversold && priceDecreasing && strongTrend && goodVolatility;
+        }
+
+        private void DrawLongSignal(double score)
+        {
+            try
+            {
+                string scoreInfo = string.Format("\nScore: {0:F1}", score);
+                string priceInfo = string.Format("\nPrice: {0}", Close[0].ToString("N2"));
+                Draw.ArrowUp(this, "Long_" + CurrentBar, false, 0, Low[0] - atr[0] * ATRMultiplier, Brushes.LimeGreen);
+                Draw.Text(this, "LongText_" + CurrentBar, "LONG" + scoreInfo + priceInfo, 
+                    0, Low[0] - atr[0] * ATRMultiplier * 2, Brushes.LimeGreen);
+                LastSignalBar = CurrentBar;
+              
+                if (ShowDebug)
+                {
+                    Print($"LONG Signal | Price: {Close[0]} | Score: {score:F1} | Trend: {trendStrength[0]:F1}");
+                }
+            }
+            catch (Exception e)
+            {
+                if (ShowDebug)
+                    Print($"Error in DrawLongSignal: {e.Message}");
+            }
+        }
+
+        private void DrawShortSignal(double score)
+        {
+            try
+            {
+                string scoreInfo = string.Format("\nScore: {0:F1}", score);
+                string priceInfo = string.Format("\nPrice: {0}", Close[0].ToString("N2"));
+                Draw.ArrowDown(this, "Short_" + CurrentBar, false, 0, High[0] + atr[0] * ATRMultiplier, Brushes.Red);
+                Draw.Text(this, "ShortText_" + CurrentBar, "SHORT" + scoreInfo + priceInfo, 
+                    0, High[0] + atr[0] * ATRMultiplier * 2, Brushes.Red);
+                LastSignalBar = CurrentBar;
+              
+                if (ShowDebug)
+                {
+                    Print($"SHORT Signal | Price: {Close[0]} | Score: {score:F1} | Trend: {trendStrength[0]:F1}");
+                }
+            }
+            catch (Exception e)
+            {
+                if (ShowDebug)
+                    Print($"Error in DrawShortSignal: {e.Message}");
+            }
+        }
+
+        #region Properties
+        [Range(1, int.MaxValue)]
+        [NinjaScriptProperty]
+        [Display(Name = "EMA Period", Description = "EMA Period", Order = 1, GroupName = "Parameters")]
+        public int EMAPeriod { get; set; }
+
+        [Range(1, int.MaxValue)]
+        [NinjaScriptProperty]
+        [Display(Name = "Cooldown Bars", Description = "Bars between signals", Order = 2, GroupName = "Parameters")]
+        public int CooldownBars { get; set; }
+
+        [Range(1, int.MaxValue)]
+        [NinjaScriptProperty]
+        [Display(Name = "RSI Period", Description = "RSI Period", Order = 3, GroupName = "Parameters")]
+        public int RSIPeriod { get; set; }
+
+        [Range(1, int.MaxValue)]
+        [NinjaScriptProperty]
+        [Display(Name = "RSI Smooth Period", Description = "RSI Smoothing Period", Order = 4, GroupName = "Parameters")]
+        public int RSISmoothPeriod { get; set; }
+
+        [Range(1, 100)]
+        [NinjaScriptProperty]
+        [Display(Name = "RSI Oversold", Description = "RSI Oversold level", Order = 5, GroupName = "Parameters")]
+        public int RSIOversold { get; set; }
+
+        [Range(1, 100)]
+        [NinjaScriptProperty]
+        [Display(Name = "RSI Overbought", Description = "RSI Overbought level", Order = 6, GroupName = "Parameters")]
+        public int RSIOverbought { get; set; }
+
+        [Range(1, int.MaxValue)]
+        [NinjaScriptProperty]
+        [Display(Name = "ATR Period", Description = "ATR Period", Order = 7, GroupName = "Parameters")]
+        public int ATRPeriod { get; set; }
+
+        [Range(0.1, 10)]
+        [NinjaScriptProperty]
+        [Display(Name = "ATR Multiplier", Description = "ATR Multiplier for signal placement", Order = 8, GroupName = "Parameters")]
+        public double ATRMultiplier { get; set; }
+
+        [Range(0, 100)]
+        [NinjaScriptProperty]
+        [Display(Name = "Minimum Score", Description = "Minimum score required for signals", Order = 9, GroupName = "Parameters")]
+        public double MinimumScore { get; set; }
+
+        [Range(0, 2)]
+        [NinjaScriptProperty]
+        [Display(Name = "Signal Type", Description = "Signal Type (0=Both, 1=LongOnly, 2=ShortOnly)", Order = 10, GroupName = "Parameters")]
+        public int SignalDirection { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Show Debug", Description = "Show debug information in Output window", Order = 11, GroupName = "Parameters")]
+        public bool ShowDebug { get; set; }
+
+        private int LastSignalBar = 0;
+        #endregion
+    }
+}

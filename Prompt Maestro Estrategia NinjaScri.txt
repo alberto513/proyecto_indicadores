@@ -1,0 +1,123 @@
+Prompt Maestro: Estrategia NinjaScript Avanzada para NQ con Gráficos Wicked Renko
+El script debe ser altamente modular y optimizado, con capacidad de registro (logging) controlado y ajustes de parámetros adaptativos. A continuación se describen los módulos y lógicas principales que debe incluir:
+Detección de absorciones y spoofing: Un módulo dedicado a analizar el libro de órdenes (Level 2) y/o el delta de ticks en tiempo real. Debe identificar volúmenes excepcionalmente altos en bid/ask simultáneamente (absorciones), donde compradores absorben presión vendedora
+trader-dale.com
+. También debe reconocer patrones de spoofing: grandes órdenes colocadas y canceladas rápidamente sin ejecución, generando falsas señales
+bookmap.com
+. En la práctica, el algoritmo podría flaggear un posible spoofing cuando se detecte una gran orden en el DOM que desaparece poco después sin trades ejecutados, o una absorción cuando el delta muestra compras y ventas intensas con escaso movimiento de precio
+trader-dale.com
+bookmap.com
+. Los outputs de este módulo serán indicadores binarios o señales (p. ej. flagSpoof, flagAbsorption) para que otros módulos ajusten su comportamiento.
+Perfil de Volumen dinámico / VPOC: Un módulo que construya un perfil de volumen usando datos de volumen por precio, ya sea por bloques temporales fijos o por cada bloque de barras Renko. Debe calcular dinámicamente el Point of Control (VPOC) –el precio con mayor volumen negociado– y también identificar los nodos de alto volumen (HVN) y bajo volumen (LVN) como zonas clave de soporte/resistencia
+ninjaindicators.quantumtrading.com
+tradefundrr.com
+. Por ejemplo, mantener en memoria un historial móvil de N barras (o N bloques Renko) y actualizar en cada tick el histograma vertical de volumen. Este módulo emitiría el nivel de VPOC actual y niveles HVN/LVN para que el trading tome decisiones informadas. (El concepto clave es que el VPOC actúa como un “fulcro” del movimiento
+ninjaindicators.quantumtrading.com
+).
+Clasificación de régimen de mercado: Un módulo de alto nivel que determine si el mercado está en rango, tendencia o rompimiento. Esto puede apoyarse en la forma del perfil de volumen (por ejemplo, un perfil balanceado sugiere rango mientras que un perfil sesgado indica tendencia)
+tradefundrr.com
+, en la volatilidad (ATR) o en indicadores como Hurst exponent. El módulo debe actualizar la etiqueta del régimen en tiempo real (p. ej. MarketRegime = “Rango”/“Tendencia”/“Breakout”). Con base en esto, otros módulos activarán/desactivarán filtros o adaptarán agresividad (por ej. no tomar scalps en tendencia fuerte, solo buscar rupturas en rango definido).
+Presión de mercado (Delta, ordenes grandes, imbalance): Este módulo calculará métricas de presión mediante el delta de volumen (volumen comprador vs vendedor)
+ninjatrader.com
+ y el desequilibrio en el DOM
+bookmap.com
+. Debe detectar, por ejemplo, grandes bloques de volumen (> umbral) y relaciones buy/sell significativas (ej. compras masivas vs pocas ventas)
+tradefundrr.com
+bookmap.com
+. También puede considerar la detección de icebergs o flujos institucionales: órdenes de gran tamaño que impactan el mercado. En la práctica, esto podría ser un cálculo acumulativo del delta por barra (o tick) y el ratio de volúmenes en niveles de precios contiguos, activando alertas cuando se supera un desequilibrio crítico
+tradefundrr.com
+ninjatrader.com
+.
+Auto-ajuste de parámetros: Incorporar lógica para ajustar automáticamente parámetros clave (p. ej. umbrales de volumen, tamaños de filtro, ventanas de cálculo) según el contexto de mercado y el desempeño histórico. Esto puede apoyarse en un proceso de optimización iterativa o walk-forward analysis
+ninjatrader.com
+ninjatrader.com
+. Por ejemplo, el sistema puede recalibrar mensualmente los valores óptimos usando datos recientes, evitando el sobreajuste. Además, permitir que el usuario especifique rangos de parámetros y que el script pruebe versiones internas para seleccionar la más robusta.
+Logging y Configuración: Todas las salidas (señales, valores calculados, eventos detectados) deben estar debidamente documentadas. Definir métodos para registrar información relevante (por ejemplo, con Print() o Log() de NinjaScript) en puntos críticos (entrada/salida de trades, detección de patrones). Sin embargo, cuidar el rendimiento: el uso excesivo de Print()/Log() puede degradar la ejecución
+ninjatrader.com
+. Incluir además un sistema de configuración (parámetros ajustables) en forma de propiedades del indicador/estrategia, de modo que el usuario pueda personalizar horizontes Renko, filtros de volumen, etc.
+Para estructurar el prompt maestro, se puede seguir una organización tipo tabla o lista que resuma cada módulo, como en el siguiente ejemplo:
+Módulo	Función principal	Referencias clave
+Absorción / Spoofing	Detecta grandes órdenes ejecutadas o canceladas (falsas) en libro de órdenes
+trader-dale.com
+bookmap.com
+Patrones de absorción
+trader-dale.com
+; spoofing
+bookmap.com
+Perfil de Volumen / VPOC	Construye perfiles por bloque (Renko/tiempo) y calcula el VPOC dinámico
+ninjaindicators.quantumtrading.com
+VPOC como fulcro
+ninjaindicators.quantumtrading.com
+; nodos HVN/LVN
+Regímenes de Mercado	Clasifica mercado en rango/tendencia/breakout (p.ej. usando forma del perfil)
+tradefundrr.com
+Perfil de volumen para tendencia/rango
+tradefundrr.com
+Presión de Mercado	Analiza delta (bid vs ask) y desequilibrios en órdenes
+ninjatrader.com
+bookmap.com
+Delta acumulado
+ninjatrader.com
+; ratio 3:1
+tradefundrr.com
+Auto-ajuste Parámetros	Re-optimiza umbrales y filtros según contexto/performance (walk-forward)
+ninjatrader.com
+ninjatrader.com
+Strategy Analyzer y walk-forward
+ninjatrader.com
+Logging / Configuración	Registro de eventos clave con Print()/Log(); parámetros adaptativos
+ninjatrader.com
+Uso moderado de logs
+ninjatrader.com
+
+A continuación, el prompt a proporcionar a Codex debe describir esta estructura en detalle (en español). Por ejemplo:
+markdown
+Copiar
+Editar
+Prompt: Desarrolla un NinjaScript modular para NinjaTrader 8 enfocado en futuros Nasdaq (NQ) usando barras Wicked Renko. El código debe incluir:
+
+- Módulo de **Detección de Absorciones y Spoofing**: analiza el DOM y el delta de ticks. Implementa lógica para marcar niveles donde aparecen grandes órdenes canceladas (spoofing) y volúmenes elevados en bid/ask (absorciones):contentReference[oaicite:34]{index=34}:contentReference[oaicite:35]{index=35}.
+- Módulo de **Perfil de Volumen Dinámico / VPOC**: calcula el perfil de volumen por bloques (por ejemplo, cada X barras Renko) y determina el nivel de VPOC actual:contentReference[oaicite:36]{index=36}. Destaca nodos de alto/bajo volumen (HVN/LVN) para soporte/resistencia.
+- Módulo de **Clasificación de Régimen de Mercado**: define si el mercado está en rango, tendencia o breakout. Usa el perfil de volumen o indicadores de volatilidad para etiquetar el régimen:contentReference[oaicite:37]{index=37} y activar filtros apropiados.
+- Módulo de **Presión de Mercado (Delta/Imbalance)**: calcula delta acumulado (volumen comprador vs vendedor):contentReference[oaicite:38]{index=38} y detecta desequilibrios del libro de órdenes:contentReference[oaicite:39]{index=39}. Por ejemplo, genera señales cuando el ratio compra/venta supera 3:1:contentReference[oaicite:40]{index=40}.
+- Módulo de **Auto-ajuste de Parámetros**: integra optimización continua (Strategy Analyzer) con walk-forward:contentReference[oaicite:41]{index=41}. Permite recalibrar umbrales basados en análisis histórico para adaptarse a cambios de mercado.
+- **Logging y Configuración**: cada módulo expone parámetros configurables. Añade llamadas moderadas a `Print()` o `Log()` en eventos importantes, recordando que un uso intensivo puede afectar el rendimiento:contentReference[oaicite:42]{index=42}.
+
+Organiza el código en clases/métodos claros para cada función. Incluye comentarios en español explicativos (por ejemplo, sobre cómo se calcula el VPOC o se detecta spoofing) y estructura el flujo de datos entre módulos. Por ejemplo, detalla en pseudo-código la inicialización, el cálculo en `OnBarUpdate()`, y el registro de eventos clave:contentReference[oaicite:43]{index=43}:contentReference[oaicite:44]{index=44}:contentReference[oaicite:45]{index=45}:contentReference[oaicite:46]{index=46}. 
+Este prompt maestro, enriquecido con los conceptos institucionales y referencias citadas, servirá de guía completa para que Codex genere el NinjaScript requerido. Referencias clave: conceptos de absorción y spoofing
+trader-dale.com
+bookmap.com
+, perfil de volumen/VPOC
+ninjaindicators.quantumtrading.com
+tradefundrr.com
+, delta/imabalance
+ninjatrader.com
+bookmap.com
+, optimización de parámetros
+ninjatrader.com
+ninjatrader.com
+ y mejores prácticas de logging
+ninjatrader.com
+.
+
+
+
+
+
+
+Fuentes
+
+
+
+
+
+
+Preguntar a ChatGPT
+
+
+
+Herramientas
+
+
+
+ChatGPT puede cometer errores. Comprueba la información importante.

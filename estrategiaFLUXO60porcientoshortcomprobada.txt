@@ -1,0 +1,76 @@
+using System;
+using System.Windows.Media;
+using NinjaTrader.Cbi;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Strategies;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public class MagnoFluxScalperShortStrategy : Strategy
+    {
+        // Parámetros optimizados para señales SHORT
+        [NinjaScriptProperty] public int CooldownBars { get; set; } = 1;
+        [NinjaScriptProperty] public int MinConditions { get; set; } = 3;
+        [NinjaScriptProperty] public double VolumeThreshold { get; set; } = 1.3;
+        [NinjaScriptProperty] public int SpeedTicks { get; set; } = 18;
+        [NinjaScriptProperty] public double BodyContextRatio { get; set; } = 0.4;
+        [NinjaScriptProperty] public double SlopeMin { get; set; } = 0.035;
+        [NinjaScriptProperty] public string SessionStart { get; set; } = "10:30";
+        [NinjaScriptProperty] public string SessionEnd { get; set; } = "13:00";
+        [NinjaScriptProperty] public int StopLossTicks { get; set; } = 36;
+        [NinjaScriptProperty] public int ProfitTargetTicks { get; set; } = 30;
+
+        private int lastSignalBar = -1000;
+        private TimeSpan sessionStart;
+        private TimeSpan sessionEnd;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "MagnoFluxScalperShortStrategy";
+                Calculate = Calculate.OnBarClose;
+            }
+            else if (State == State.Configure)
+            {
+                sessionStart = TimeSpan.Parse(SessionStart);
+                sessionEnd = TimeSpan.Parse(SessionEnd);
+                SetProfitTarget(CalculationMode.Ticks, ProfitTargetTicks);
+                SetStopLoss(CalculationMode.Ticks, StopLossTicks);
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 20 || CurrentBar <= lastSignalBar + CooldownBars)
+                return;
+
+            var now = Time[0].TimeOfDay;
+            if (now < sessionStart || now > sessionEnd)
+                return;
+
+            // 1) Filtros comunes
+            double avgVol = SMA(Volume, 10)[0];
+            bool volSpike = Volume[0] > avgVol * VolumeThreshold;
+            double fastMove = Math.Abs(Close[0] - Close[2]) / TickSize;
+            bool speedOk = fastMove >= SpeedTicks;
+            double bodySize = Math.Abs(Close[0] - Open[0]);
+            bool contextOk = bodySize > (High[0] - Low[0]) * BodyContextRatio;
+            int passCount = (volSpike ? 1 : 0) + (speedOk ? 1 : 0) + (contextOk ? 1 : 0);
+
+            // 2) Pendiente EMA(14) para downTrend
+            double slope = (EMA(14)[0] - EMA(14)[3]) / (3 * TickSize);
+            bool downTrend = slope < -SlopeMin;
+
+            // 3) Entrada SHORT
+            if (Position.MarketPosition == MarketPosition.Flat && downTrend && passCount >= MinConditions && Close[0] < Open[0])
+            {
+                EnterShort();
+                Draw.ArrowDown(this, "short" + CurrentBar, true, 0, High[0] + TickSize, Brushes.Red);
+                lastSignalBar = CurrentBar;
+            }
+        }
+    }
+}
