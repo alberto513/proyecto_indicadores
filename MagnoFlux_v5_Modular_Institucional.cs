@@ -14,6 +14,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
     public class MagnoFlux_v5_Modular_Institucional : Strategy
     {
+        private class SignalData
+        {
+            public int SignalBar;
+            public int EntryBar;
+            public DateTime Time;
+            public bool IsLong;
+            public double EntryPrice;
+            public double TP;
+            public double SL;
+            public bool Done = false;
+        }
         #region Parameters
         [NinjaScriptProperty]
         [Display(Name = "UseAtrTargets", Order = 1, GroupName = "Parameters")]
@@ -131,6 +142,8 @@ namespace NinjaTrader.NinjaScript.Strategies
         private int entryQty;
         private int netContractsClosed;
         private double tradeEfficiency;
+        private List<SignalData> pendingSignals = new List<SignalData>();
+        private int SignalPoints = 40; // 10 puntos (ajustable)
 
         protected override void OnStateChange()
         {
@@ -256,6 +269,24 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             ManagePosition();
+
+            foreach (var sig in pendingSignals)
+            {
+                if (sig.Done || CurrentBar <= sig.EntryBar)
+                    continue;
+
+                bool hitTP = sig.IsLong ? High[0] >= sig.TP : Low[0] <= sig.TP;
+                bool hitSL = sig.IsLong ? Low[0] <= sig.SL : High[0] >= sig.SL;
+
+                if (hitTP || hitSL)
+                {
+                    string dir = sig.IsLong ? "LONG" : "SHORT";
+                    string result = hitTP ? "TP" : "SL";
+                    string log = $"{dir}={sig.Time:HH:mm:ss} - Señal {sig.EntryPrice:F2} Entrada={sig.EntryPrice:F2} - TP={sig.TP:F2} - SL={sig.SL:F2} - Resultado={result}";
+                    Print(log.Replace('.', ','));
+                    sig.Done = true;
+                }
+            }
         }
 
         private void ExecuteEntry(bool isLong)
@@ -318,6 +349,20 @@ namespace NinjaTrader.NinjaScript.Strategies
                 EnterShort(currentQty, "ShortEntry");
             Draw.VerticalLine(this, "entry" + CurrentBar.ToString(), 0, isLong ? Brushes.Lime : Brushes.Red);
             Print($"{(isLong ? "LONG" : "SHORT") }={signalTime:HH:mm:ss} - Entrada={entryPrice:F2} - TP={tpPrice:F2} - SL={slPrice:F2}");
+
+            double tp = isLong ? entryPrice + SignalPoints * TickSize : entryPrice - SignalPoints * TickSize;
+            double sl = isLong ? entryPrice - SignalPoints * TickSize : entryPrice + SignalPoints * TickSize;
+
+            pendingSignals.Add(new SignalData
+            {
+                SignalBar = CurrentBar - 1,
+                EntryBar = CurrentBar,
+                Time = signalTime,
+                IsLong = isLong,
+                EntryPrice = entryPrice,
+                TP = tp,
+                SL = sl
+            });
         }
 
         private void ManagePosition()
