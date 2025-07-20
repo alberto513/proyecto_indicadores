@@ -437,9 +437,22 @@ namespace NinjaTrader.NinjaScript.Strategies
             else
             {
                 partial1Qty = (int)Math.Max(1, Math.Round(qty * 0.5));
-                partial2Qty = (int)Math.Max(1, Math.Round(qty * 0.25));
+                if (partial1Qty >= qty)
+                {
+                    partial1Qty = qty;
+                    partial2Qty = 0;
+                }
+                else
+                {
+                    partial2Qty = (int)Math.Max(1, Math.Round(qty * 0.25));
+                    if (partial1Qty + partial2Qty > qty)
+                        partial2Qty = Math.Max(0, qty - partial1Qty);
+                }
+
                 finalQty = qty - partial1Qty - partial2Qty;
-                partial2Done = false;
+                if (finalQty < 0)
+                    finalQty = 0;
+                partial2Done = partial2Qty == 0;
             }
 
             partial1Done = false;
