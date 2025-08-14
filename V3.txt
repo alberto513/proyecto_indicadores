@@ -1,0 +1,355 @@
+using System;
+using System.Globalization;
+using System.IO;
+using System.Windows.Media;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class AumentoV3 : Indicator
+    {
+        #region Parámetros
+        [NinjaScriptProperty] public int    SignalPoints      { get; set; } = 40;
+        [NinjaScriptProperty] public int    BiasEMA           { get; set; } = 34;
+        [NinjaScriptProperty] public double BiasSlopeMin      { get; set; } = 0.015;
+        [NinjaScriptProperty] public double EMADistMinATR     { get; set; } = 0.20;
+        [NinjaScriptProperty] public double EMADistMaxATR     { get; set; } = 1.20;
+        [NinjaScriptProperty] public double SlopeMinEMA14     { get; set; } = 0.020;
+        [NinjaScriptProperty] public double BodyContextRatio  { get; set; } = 0.35;
+        [NinjaScriptProperty] public double MaxOppWickRatio   { get; set; } = 0.30;
+        [NinjaScriptProperty] public double VolSpikeMult      { get; set; } = 2.0;
+        [NinjaScriptProperty] public int    VolSpikeLookback  { get; set; } = 20;
+        [NinjaScriptProperty] public int    ConsolidationBars { get; set; } = 12;
+        [NinjaScriptProperty] public int    ConsolidationRangeBoxes { get; set; } = 8;
+        [NinjaScriptProperty] public double ATR14vs100Min     { get; set; } = 0.90;
+        [NinjaScriptProperty] public int    AvoidOpenMinutes  { get; set; } = 15;
+        [NinjaScriptProperty] public int    CooldownBars      { get; set; } = 2;
+        #endregion
+
+        #region Indicadores
+        private EMA emaBias;
+        private EMA ema14;
+        private ATR atr14;
+        private ATR atr100;
+        private MAX maxHigh;
+        private MIN minLow;
+        private Series<double> volD;
+        private MAX maxVol;
+        #endregion
+
+        #region Estado
+        private int lastSignalBar = -1000;
+        private CultureInfo es = CultureInfo.GetCultureInfo("es-ES");
+        private DateTime sessionStart;
+
+        private int tot, win, loss;
+        private int pnlTicks;
+
+        private class SignalData
+        {
+            public int SignalBar;
+            public bool IsLong;
+            public double Entry;
+            public double TP, SL;
+            public bool InTrade;
+            public DateTime SignalTime;
+            public double SignalPrice;
+        }
+        private SignalData sig;
+
+        private string logPath;
+        #endregion
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "AumentoV3";
+                Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+                AddPlot(Brushes.Transparent, "Signal");
+            }
+            else if (State == State.DataLoaded)
+            {
+                emaBias = EMA(BiasEMA);
+                ema14   = EMA(14);
+                atr14   = ATR(14);
+                atr100  = ATR(100);
+                volD    = new Series<double>(this);
+                maxVol  = MAX(volD, VolSpikeLookback);
+                maxHigh = MAX(High, ConsolidationBars);
+                minLow  = MIN(Low, ConsolidationBars);
+
+                logPath = Path.Combine(NinjaTrader.Core.Globals.UserDataDir, "AumentoV3_log.csv");
+                if (!File.Exists(logPath))
+                    File.AppendAllText(logPath, "Time,Entry,TP,SL,Result,DurationMinutes,Bars\n");
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            volD[0] = Volume[0];
+            if (CurrentBar < Math.Max(100, Math.Max(VolSpikeLookback, ConsolidationBars) + 5))
+                return;
+
+            if (Bars.IsFirstBarOfSession)
+                sessionStart = Time[0];
+            if ((Time[0] - sessionStart).TotalMinutes < AvoidOpenMinutes)
+                return;
+
+            Values[0][0] = 0;
+
+            ManageOpenTrade();
+            if (sig != null && sig.InTrade)
+                return;
+
+            if (CurrentBar <= lastSignalBar + CooldownBars)
+                return;
+
+            if (IsConsolidating())
+                return;
+
+            double atr = atr14[0];
+            double emaBiasV = emaBias[0];
+            double distATR = Math.Abs(Close[0] - emaBiasV) / atr;
+
+            int volPts = VolSpikePoints();
+            int distPts = DistToEmaPoints(distATR);
+
+            int biasLongPts  = BiasPoints(true);
+            int biasShortPts = BiasPoints(false);
+            int slopeLongPts  = SlopePoints(true);
+            int slopeShortPts = SlopePoints(false);
+            int patternLongPts  = CandlePatternPoints(true);
+            int patternShortPts = CandlePatternPoints(false);
+
+            int scoreLong  = biasLongPts + volPts + slopeLongPts + distPts + patternLongPts;
+            int scoreShort = biasShortPts + volPts + slopeShortPts + distPts + patternShortPts;
+
+            bool longOK  = biasLongPts > 0 && scoreLong >= 7 && (volPts == 2 || patternLongPts == 2);
+            bool shortOK = biasShortPts > 0 && scoreShort >= 7 && (volPts == 2 || patternShortPts == 2);
+
+            bool picked = false;
+            bool isLong = false;
+            if (longOK && !shortOK) { picked = true; isLong = true; }
+            else if (shortOK && !longOK) { picked = true; isLong = false; }
+            else if (longOK && shortOK)
+            {
+                double s = Slope(ema14, 5, 0);
+                picked = true;
+                isLong = s >= 0;
+            }
+
+            if (picked)
+            {
+                var brush = isLong ? Brushes.LimeGreen : Brushes.IndianRed;
+                Draw.VerticalLine(this, "AumV3VL_" + CurrentBar, 0, brush);
+                if (isLong)
+                    Draw.ArrowUp(this, "AumV3Up_" + CurrentBar, true, 0, Low[0] - TickSize, brush);
+                else
+                    Draw.ArrowDown(this, "AumV3Dn_" + CurrentBar, true, 0, High[0] + TickSize, brush);
+
+                lastSignalBar = CurrentBar;
+
+                sig = new SignalData
+                {
+                    SignalBar   = CurrentBar,
+                    IsLong      = isLong,
+                    InTrade     = false,
+                    SignalTime  = Time[0],
+                    SignalPrice = Close[0]
+                };
+                Values[0][0] = 1;
+            }
+        }
+
+        #region Módulos de Puntaje
+        private int BiasPoints(bool isLong)
+        {
+            double slope = Slope(emaBias, 5, 0);
+            if (isLong && Close[0] > emaBias[0] && slope >= BiasSlopeMin) return 2;
+            if (!isLong && Close[0] < emaBias[0] && slope <= -BiasSlopeMin) return 2;
+            return 0;
+        }
+
+        private int VolSpikePoints()
+        {
+            double maxPrev = maxVol[1];
+            return Volume[0] >= VolSpikeMult * maxPrev ? 2 : 0;
+        }
+
+        private int SlopePoints(bool isLong)
+        {
+            double s = Slope(ema14, 5, 0);
+            if (isLong && s >= SlopeMinEMA14) return 2;
+            if (!isLong && s <= -SlopeMinEMA14) return 2;
+            return 0;
+        }
+
+        private int DistToEmaPoints(double distATR)
+        {
+            return (distATR >= EMADistMinATR && distATR <= EMADistMaxATR) ? 2 : 0;
+        }
+
+        private int CandlePatternPoints(bool isLong)
+        {
+            double range = High[0] - Low[0];
+            if (range == 0) return 0;
+            double body = Math.Abs(Close[0] - Open[0]);
+            double upperWick = High[0] - Math.Max(Open[0], Close[0]);
+            double lowerWick = Math.Min(Open[0], Close[0]) - Low[0];
+
+            if (isLong)
+            {
+                if (Close[0] > Open[0] && body >= range * BodyContextRatio && lowerWick <= range * MaxOppWickRatio)
+                    return 2;
+            }
+            else
+            {
+                if (Close[0] < Open[0] && body >= range * BodyContextRatio && upperWick <= range * MaxOppWickRatio)
+                    return 2;
+            }
+            return 0;
+        }
+
+        private bool IsConsolidating()
+        {
+            double rangeN = maxHigh[0] - minLow[0];
+            bool atrLow = atr14[0] < ATR14vs100Min * atr100[0];
+            double boxTicks = BarsPeriod.BarsPeriodType == BarsPeriodType.Renko ? BarsPeriod.Value : 0;
+            bool rangeBoxesLow;
+            if (boxTicks > 0)
+                rangeBoxesLow = rangeN <= ConsolidationRangeBoxes * Instrument.MasterInstrument.TickSize * boxTicks;
+            else
+                rangeBoxesLow = rangeN <= 0.25 * atr14[0];
+            return atrLow || rangeBoxesLow;
+        }
+        #endregion
+
+        #region Gestión de trade
+        private void ManageOpenTrade()
+        {
+            if (sig == null)
+                return;
+
+            if (!sig.InTrade && CurrentBar >= sig.SignalBar + 1)
+            {
+                sig.Entry = Open[0];
+                double r = SignalPoints * TickSize;
+                if (sig.IsLong)
+                {
+                    sig.TP = sig.Entry + r;
+                    sig.SL = sig.Entry - r;
+                }
+                else
+                {
+                    sig.TP = sig.Entry - r;
+                    sig.SL = sig.Entry + r;
+                }
+                sig.InTrade = true;
+
+                Print($"{(sig.IsLong ? "LONG" : "SHORT")}={sig.SignalTime:HH:mm:ss} - Señal {sig.SignalPrice.ToString("0.00", es)} Entrada={sig.Entry.ToString("0.00", es)} - TP={sig.TP.ToString("0.00", es)} - SL={sig.SL.ToString("0.00", es)} - Resultado=EN_CURSO");
+                return;
+            }
+
+            if (!sig.InTrade)
+                return;
+
+            bool hitTP = sig.IsLong ? High[0] >= sig.TP : Low[0] <= sig.TP;
+            bool hitSL = sig.IsLong ? Low[0] <= sig.SL : High[0] >= sig.SL;
+
+            if (hitTP || hitSL)
+            {
+                string res = hitTP ? "TP" : "SL";
+                double exitPrice = hitTP ? sig.TP : sig.SL;
+
+                tot++;
+                if (hitTP) win++; else loss++;
+
+                int ticks = (int)Math.Round(Math.Abs(exitPrice - sig.Entry) / TickSize);
+                pnlTicks += hitTP ? +ticks : -ticks;
+
+                Print($"{(sig.IsLong ? "LONG" : "SHORT")}={sig.SignalTime:HH:mm:ss} - Señal {sig.SignalPrice.ToString("0.00", es)} Entrada={sig.Entry.ToString("0.00", es)} - TP={sig.TP.ToString("0.00", es)} - SL={sig.SL.ToString("0.00", es)} - Resultado={res}");
+                PrintStat();
+
+                TimeSpan dur = Time[0] - sig.SignalTime;
+                int bars = CurrentBar - sig.SignalBar;
+                string line = string.Format(CultureInfo.InvariantCulture,
+                    "{0:yyyy-MM-dd HH:mm:ss},{1:0.00},{2:0.00},{3:0.00},{4},{5:F1},{6}\n",
+                    sig.SignalTime, sig.Entry, sig.TP, sig.SL, res, dur.TotalMinutes, bars);
+                File.AppendAllText(logPath, line);
+
+                sig = null;
+            }
+        }
+        #endregion
+
+        #region Utilidades
+        private void PrintStat()
+        {
+            double wr = tot > 0 ? (double)win / tot * 100.0 : 0.0;
+            Print($"Trades={tot} Win={win} Loss={loss} WinRate={wr:F1}% PnL={pnlTicks:+#;-#;0} ticks");
+        }
+        #endregion
+    }
+}
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private AumentoV3[] cacheAumentoV3;
+		public AumentoV3 AumentoV3(int signalPoints, int biasEMA, double biasSlopeMin, double eMADistMinATR, double eMADistMaxATR, double slopeMinEMA14, double bodyContextRatio, double maxOppWickRatio, double volSpikeMult, int volSpikeLookback, int consolidationBars, int consolidationRangeBoxes, double aTR14vs100Min, int avoidOpenMinutes, int cooldownBars)
+		{
+			return AumentoV3(Input, signalPoints, biasEMA, biasSlopeMin, eMADistMinATR, eMADistMaxATR, slopeMinEMA14, bodyContextRatio, maxOppWickRatio, volSpikeMult, volSpikeLookback, consolidationBars, consolidationRangeBoxes, aTR14vs100Min, avoidOpenMinutes, cooldownBars);
+		}
+
+		public AumentoV3 AumentoV3(ISeries<double> input, int signalPoints, int biasEMA, double biasSlopeMin, double eMADistMinATR, double eMADistMaxATR, double slopeMinEMA14, double bodyContextRatio, double maxOppWickRatio, double volSpikeMult, int volSpikeLookback, int consolidationBars, int consolidationRangeBoxes, double aTR14vs100Min, int avoidOpenMinutes, int cooldownBars)
+		{
+			if (cacheAumentoV3 != null)
+				for (int idx = 0; idx < cacheAumentoV3.Length; idx++)
+					if (cacheAumentoV3[idx] != null && cacheAumentoV3[idx].SignalPoints == signalPoints && cacheAumentoV3[idx].BiasEMA == biasEMA && cacheAumentoV3[idx].BiasSlopeMin == biasSlopeMin && cacheAumentoV3[idx].EMADistMinATR == eMADistMinATR && cacheAumentoV3[idx].EMADistMaxATR == eMADistMaxATR && cacheAumentoV3[idx].SlopeMinEMA14 == slopeMinEMA14 && cacheAumentoV3[idx].BodyContextRatio == bodyContextRatio && cacheAumentoV3[idx].MaxOppWickRatio == maxOppWickRatio && cacheAumentoV3[idx].VolSpikeMult == volSpikeMult && cacheAumentoV3[idx].VolSpikeLookback == volSpikeLookback && cacheAumentoV3[idx].ConsolidationBars == consolidationBars && cacheAumentoV3[idx].ConsolidationRangeBoxes == consolidationRangeBoxes && cacheAumentoV3[idx].ATR14vs100Min == aTR14vs100Min && cacheAumentoV3[idx].AvoidOpenMinutes == avoidOpenMinutes && cacheAumentoV3[idx].CooldownBars == cooldownBars && cacheAumentoV3[idx].EqualsInput(input))
+						return cacheAumentoV3[idx];
+			return CacheIndicator<AumentoV3>(new AumentoV3(){ SignalPoints = signalPoints, BiasEMA = biasEMA, BiasSlopeMin = biasSlopeMin, EMADistMinATR = eMADistMinATR, EMADistMaxATR = eMADistMaxATR, SlopeMinEMA14 = slopeMinEMA14, BodyContextRatio = bodyContextRatio, MaxOppWickRatio = maxOppWickRatio, VolSpikeMult = volSpikeMult, VolSpikeLookback = volSpikeLookback, ConsolidationBars = consolidationBars, ConsolidationRangeBoxes = consolidationRangeBoxes, ATR14vs100Min = aTR14vs100Min, AvoidOpenMinutes = avoidOpenMinutes, CooldownBars = cooldownBars }, input, ref cacheAumentoV3);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.AumentoV3 AumentoV3(int signalPoints, int biasEMA, double biasSlopeMin, double eMADistMinATR, double eMADistMaxATR, double slopeMinEMA14, double bodyContextRatio, double maxOppWickRatio, double volSpikeMult, int volSpikeLookback, int consolidationBars, int consolidationRangeBoxes, double aTR14vs100Min, int avoidOpenMinutes, int cooldownBars)
+		{
+			return indicator.AumentoV3(Input, signalPoints, biasEMA, biasSlopeMin, eMADistMinATR, eMADistMaxATR, slopeMinEMA14, bodyContextRatio, maxOppWickRatio, volSpikeMult, volSpikeLookback, consolidationBars, consolidationRangeBoxes, aTR14vs100Min, avoidOpenMinutes, cooldownBars);
+		}
+
+		public Indicators.AumentoV3 AumentoV3(ISeries<double> input , int signalPoints, int biasEMA, double biasSlopeMin, double eMADistMinATR, double eMADistMaxATR, double slopeMinEMA14, double bodyContextRatio, double maxOppWickRatio, double volSpikeMult, int volSpikeLookback, int consolidationBars, int consolidationRangeBoxes, double aTR14vs100Min, int avoidOpenMinutes, int cooldownBars)
+		{
+			return indicator.AumentoV3(input, signalPoints, biasEMA, biasSlopeMin, eMADistMinATR, eMADistMaxATR, slopeMinEMA14, bodyContextRatio, maxOppWickRatio, volSpikeMult, volSpikeLookback, consolidationBars, consolidationRangeBoxes, aTR14vs100Min, avoidOpenMinutes, cooldownBars);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.AumentoV3 AumentoV3(int signalPoints, int biasEMA, double biasSlopeMin, double eMADistMinATR, double eMADistMaxATR, double slopeMinEMA14, double bodyContextRatio, double maxOppWickRatio, double volSpikeMult, int volSpikeLookback, int consolidationBars, int consolidationRangeBoxes, double aTR14vs100Min, int avoidOpenMinutes, int cooldownBars)
+		{
+			return indicator.AumentoV3(Input, signalPoints, biasEMA, biasSlopeMin, eMADistMinATR, eMADistMaxATR, slopeMinEMA14, bodyContextRatio, maxOppWickRatio, volSpikeMult, volSpikeLookback, consolidationBars, consolidationRangeBoxes, aTR14vs100Min, avoidOpenMinutes, cooldownBars);
+		}
+
+		public Indicators.AumentoV3 AumentoV3(ISeries<double> input , int signalPoints, int biasEMA, double biasSlopeMin, double eMADistMinATR, double eMADistMaxATR, double slopeMinEMA14, double bodyContextRatio, double maxOppWickRatio, double volSpikeMult, int volSpikeLookback, int consolidationBars, int consolidationRangeBoxes, double aTR14vs100Min, int avoidOpenMinutes, int cooldownBars)
+		{
+			return indicator.AumentoV3(input, signalPoints, biasEMA, biasSlopeMin, eMADistMinATR, eMADistMaxATR, slopeMinEMA14, bodyContextRatio, maxOppWickRatio, volSpikeMult, volSpikeLookback, consolidationBars, consolidationRangeBoxes, aTR14vs100Min, avoidOpenMinutes, cooldownBars);
+		}
+	}
+}
+
+#endregion

@@ -1,0 +1,699 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Globalization;
+using System.Linq;
+using System.Windows.Media;
+using System.Xml.Serialization;
+using SharpDX;
+using NinjaTrader.Cbi;
+using NinjaTrader.Data;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Gui.Tools;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.DrawingTools;
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    // Enum que representa el sesgo de cada condición y el general
+    public enum BiasColor { Bull, Bear, Neutral }
+
+    // Estructura para contener el estado actual de las tres condiciones
+    public struct BiasState
+    {
+        public BiasColor VwapBias;
+        public BiasColor DeltaBias;
+        public BiasColor ImbalanceBias;
+        public BiasColor OverallBias;
+
+        public BiasState(BiasColor vwapBias, BiasColor deltaBias, BiasColor imbalanceBias, BiasColor overallBias)
+        {
+            VwapBias = vwapBias;
+            DeltaBias = deltaBias;
+            ImbalanceBias = imbalanceBias;
+            OverallBias = overallBias;
+        }
+    }
+
+    /// <summary>
+    /// Panel gráfico que muestra un semáforo grande indicando el sesgo institucional
+    /// basado en VWAP, delta acumulado e imbalance del libro de órdenes.
+    /// Compatible con cualquier tipo de gráfico (incluye Wicked Renko).
+    /// </summary>
+    public class InstitutionalBiasPanel : Indicator
+    {
+        #region Campos privados
+        // Variables para VWAP manual de sesión
+        private double sumPV;
+        private double sumV;
+        private double manualVwap;
+
+        // Delta acumulado manual
+        private Series<double> manualCumDeltaSeries;
+        private double manualCumDelta;
+
+        // Estructuras para imbalance Level II
+        private readonly object bookLock = new object();
+        private readonly SortedDictionary<int, double> bidSizes = new SortedDictionary<int, double>();
+        private readonly SortedDictionary<int, double> askSizes = new SortedDictionary<int, double>();
+        private double totalBidSize;
+        private double totalAskSize;
+
+        // Fallback sin Level II
+        private double aggressiveBuyVolume;
+        private double aggressiveSellVolume;
+
+        // Recursos gráficos
+        private SharpDX.Direct2D1.Brush bullBrush;
+        private SharpDX.Direct2D1.Brush bearBrush;
+        private SharpDX.Direct2D1.Brush neutralBrush;
+        private SharpDX.Direct2D1.Brush textBrush;
+        private SharpDX.Direct2D1.Brush panelBgBrush;
+        private SharpDX.Direct2D1.Brush panelBorderBrush;
+
+        private SharpDX.DirectWrite.Factory dwFactory;
+        private SharpDX.DirectWrite.TextFormat textFormat;
+        private SharpDX.DirectWrite.TextFormat bigTextFormat;
+
+        // Estado interno y métricas
+        private BiasColor lastOverall = BiasColor.Neutral;
+        private int lastFlipBar = -100000;
+        private Queue<BiasColor> history;
+
+        private BiasColor currentVwapBias = BiasColor.Neutral;
+        private BiasColor currentDeltaBias = BiasColor.Neutral;
+        private BiasColor currentImbalanceBias = BiasColor.Neutral;
+        private BiasColor currentOverallBias = BiasColor.Neutral;
+
+        private double lastVwapDiffPct;
+        private double lastCumDelta;
+        private double lastDeltaSlope;
+        private double lastImbalanceRatio;
+        #endregion
+
+        #region Propiedades configurables
+        [NinjaScriptProperty]
+        [Display(Name = "PanelWidth", Order = 1, GroupName = "Visual", Description = "Ancho del panel.")]
+        public int PanelWidth { get; set; } = 180;
+
+        [NinjaScriptProperty]
+        [Display(Name = "PanelHeight", Order = 2, GroupName = "Visual", Description = "Alto del panel.")]
+        public int PanelHeight { get; set; } = 140;
+
+        [NinjaScriptProperty]
+        [Display(Name = "PanelX", Order = 3, GroupName = "Visual", Description = "Posición X del panel.")]
+        public int PanelX { get; set; } = 20;
+
+        [NinjaScriptProperty]
+        [Display(Name = "PanelY", Order = 4, GroupName = "Visual", Description = "Posición Y del panel.")]
+        public int PanelY { get; set; } = 20;
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "ColorBull", Order = 5, GroupName = "Visual", Description = "Color para condición alcista.")]
+        public Brush ColorBull { get; set; } = Brushes.LimeGreen;
+
+        [Browsable(false)]
+        public string ColorBullSerializable
+        {
+            get { return Serialize.BrushToString(ColorBull); }
+            set { ColorBull = Serialize.StringToBrush(value); }
+        }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "ColorBear", Order = 6, GroupName = "Visual", Description = "Color para condición bajista.")]
+        public Brush ColorBear { get; set; } = Brushes.Red;
+
+        [Browsable(false)]
+        public string ColorBearSerializable
+        {
+            get { return Serialize.BrushToString(ColorBear); }
+            set { ColorBear = Serialize.StringToBrush(value); }
+        }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "ColorNeutral", Order = 7, GroupName = "Visual", Description = "Color para condición neutral.")]
+        public Brush ColorNeutral { get; set; } = Brushes.Gold;
+
+        [Browsable(false)]
+        public string ColorNeutralSerializable
+        {
+            get { return Serialize.BrushToString(ColorNeutral); }
+            set { ColorNeutral = Serialize.StringToBrush(value); }
+        }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "TextColor", Order = 8, GroupName = "Visual", Description = "Color del texto.")]
+        public Brush TextColor { get; set; } = Brushes.White;
+
+        [Browsable(false)]
+        public string TextColorSerializable
+        {
+            get { return Serialize.BrushToString(TextColor); }
+            set { TextColor = Serialize.StringToBrush(value); }
+        }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "PanelBgColor", Order = 9, GroupName = "Visual", Description = "Color de fondo del panel.")]
+        public Brush PanelBgColor { get; set; } = Brushes.DimGray;
+
+        [Browsable(false)]
+        public string PanelBgColorSerializable
+        {
+            get { return Serialize.BrushToString(PanelBgColor); }
+            set { PanelBgColor = Serialize.StringToBrush(value); }
+        }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "PanelBorderColor", Order = 10, GroupName = "Visual", Description = "Color del borde del panel.")]
+        public Brush PanelBorderColor { get; set; } = Brushes.Black;
+
+        [Browsable(false)]
+        public string PanelBorderColorSerializable
+        {
+            get { return Serialize.BrushToString(PanelBorderColor); }
+            set { PanelBorderColor = Serialize.StringToBrush(value); }
+        }
+
+        [NinjaScriptProperty]
+        [Display(Name = "VwapNearPct", Order = 11, GroupName = "Parametros", Description = "Porcentaje de cercanía al VWAP para estado neutral.")]
+        public double VwapNearPct { get; set; } = 0.0005;
+
+        [NinjaScriptProperty]
+        [Display(Name = "DeltaLookbackBars", Order = 12, GroupName = "Parametros", Description = "Número de barras para la pendiente del delta acumulado.")]
+        public int DeltaLookbackBars { get; set; } = 5;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ImbalancePct", Order = 13, GroupName = "Parametros", Description = "Umbral de porcentaje de imbalance (p.ej. 0.60 = 60 %).")]
+        public double ImbalancePct { get; set; } = 0.60;
+
+        [NinjaScriptProperty]
+        [Display(Name = "UseOrderFlowPlus", Order = 14, GroupName = "Parametros", Description = "Bandera para Order Flow+ (no usado).")]
+        public bool UseOrderFlowPlus { get; set; } = true;
+
+        [NinjaScriptProperty]
+        [Display(Name = "UseLevel2Book", Order = 15, GroupName = "Parametros", Description = "Usar información de libro de órdenes Level II.")]
+        public bool UseLevel2Book { get; set; } = true;
+
+        [NinjaScriptProperty]
+        [Display(Name = "FontFamily", Order = 16, GroupName = "Visual", Description = "Nombre de la fuente para el texto.")]
+        public string FontFamily { get; set; } = "Arial";
+
+        [NinjaScriptProperty]
+        [Display(Name = "FontSize", Order = 17, GroupName = "Visual", Description = "Tamaño de la fuente.")]
+        public int FontSize { get; set; } = 14;
+
+        // Visual
+        [NinjaScriptProperty]
+        [Display(Name = "ShowBackgroundTint", Order = 18, GroupName = "Visual", Description = "Tinte de fondo según bias.")]
+        public bool ShowBackgroundTint { get; set; } = true;
+
+        [NinjaScriptProperty]
+        [Display(Name = "BackgroundOpacity", Order = 19, GroupName = "Visual", Description = "Opacidad del tinte de fondo (0-100).")]
+        public int BackgroundOpacity { get; set; } = 40;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ShowBigSignal", Order = 20, GroupName = "Visual", Description = "Mostrar círculo/emoji grande centrado.")]
+        public bool ShowBigSignal { get; set; } = true;
+
+        [NinjaScriptProperty]
+        [Display(Name = "BigSignalSize", Order = 21, GroupName = "Visual", Description = "Diámetro aproximado del semáforo principal.")]
+        public int BigSignalSize { get; set; } = 72;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ShowNumbers", Order = 22, GroupName = "Visual", Description = "Mostrar valores numéricos de cada condición.")]
+        public bool ShowNumbers { get; set; } = true;
+
+        [NinjaScriptProperty]
+        [Display(Name = "ShowHistory", Order = 23, GroupName = "Visual", Description = "Mostrar historial de sesgo.")]
+        public bool ShowHistory { get; set; } = true;
+
+        [NinjaScriptProperty]
+        [Display(Name = "HistoryBars", Order = 24, GroupName = "Visual", Description = "Número de barras a almacenar en historial.")]
+        public int HistoryBars { get; set; } = 30;
+
+        [NinjaScriptProperty]
+        [Display(Name = "UseEmoji", Order = 25, GroupName = "Visual", Description = "Usar emoji en la señal grande.")]
+        public bool UseEmoji { get; set; } = true;
+
+        // Alertas
+        [NinjaScriptProperty]
+        [Display(Name = "AlertOnFlip", Order = 1, GroupName = "Alertas", Description = "Alertar cuando cambie el bias general.")]
+        public bool AlertOnFlip { get; set; } = true;
+
+        [NinjaScriptProperty]
+        [Display(Name = "AlertSound", Order = 2, GroupName = "Alertas", Description = "Sonido de alerta.")]
+        public string AlertSound { get; set; } = "Alert1.wav";
+
+        [NinjaScriptProperty]
+        [Display(Name = "FlipCooldownBars", Order = 3, GroupName = "Alertas", Description = "Barras de enfriamiento entre alertas.")]
+        public int FlipCooldownBars { get; set; } = 5;
+        #endregion
+
+        #region Métodos NinjaScript
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "InstitutionalBiasPanel";
+                Calculate = Calculate.OnEachTick;
+                IsOverlay = true;
+                BarsRequiredToPlot = 20;
+
+                ShowBackgroundTint = true;
+                BackgroundOpacity = 40;
+                ShowBigSignal = true;
+                BigSignalSize = 72;
+                ShowNumbers = true;
+                ShowHistory = true;
+                HistoryBars = 30;
+                UseEmoji = true;
+                AlertOnFlip = true;
+                AlertSound = "Alert1.wav";
+                FlipCooldownBars = 5;
+            }
+            else if (State == State.Configure)
+            {
+                manualCumDeltaSeries = new Series<double>(this);
+                history = new Queue<BiasColor>(HistoryBars);
+            }
+            else if (State == State.Terminated)
+            {
+                DisposeBrush(ref bullBrush);
+                DisposeBrush(ref bearBrush);
+                DisposeBrush(ref neutralBrush);
+                DisposeBrush(ref textBrush);
+                DisposeBrush(ref panelBgBrush);
+                DisposeBrush(ref panelBorderBrush);
+                textFormat?.Dispose();
+                bigTextFormat?.Dispose();
+                dwFactory?.Dispose();
+                textFormat = null;
+                bigTextFormat = null;
+                dwFactory = null;
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < BarsRequiredToPlot)
+                return;
+
+            bool firstBar = Bars.IsFirstBarOfSession;
+            if (firstBar)
+            {
+                sumPV = sumV = 0;
+                manualCumDelta = 0;
+                aggressiveBuyVolume = aggressiveSellVolume = 0;
+                lock (bookLock)
+                {
+                    bidSizes.Clear();
+                    askSizes.Clear();
+                    totalBidSize = totalAskSize = 0;
+                }
+            }
+
+            // VWAP manual
+            sumPV += Close[0] * Volume[0];
+            sumV += Volume[0];
+            manualVwap = sumV > 0 ? sumPV / sumV : Close[0];
+
+            // Delta acumulado manual (regla de tick)
+            double deltaBar = 0;
+            if (CurrentBar > 0)
+            {
+                if (Close[0] > Close[1])
+                    deltaBar = Volume[0];
+                else if (Close[0] < Close[1])
+                    deltaBar = -Volume[0];
+            }
+            manualCumDelta += deltaBar;
+            manualCumDeltaSeries[0] = manualCumDelta;
+
+            // Fallback imbalance sin Level II
+            if (!UseLevel2Book)
+            {
+                if (Close[0] > Open[0])
+                    aggressiveBuyVolume += Volume[0];
+                else if (Close[0] < Open[0])
+                    aggressiveSellVolume += Volume[0];
+            }
+
+            // Evaluaciones de sesgo
+            currentVwapBias = EvaluateVWAP();
+            currentDeltaBias = EvaluateDelta();
+            currentImbalanceBias = EvaluateImbalance();
+            currentOverallBias = EvaluateOverall(currentVwapBias, currentDeltaBias, currentImbalanceBias);
+
+            if (history != null)
+            {
+                if (history.Count >= HistoryBars)
+                    history.Dequeue();
+                history.Enqueue(currentOverallBias);
+            }
+
+            if (AlertOnFlip && currentOverallBias != lastOverall && CurrentBar - lastFlipBar >= FlipCooldownBars)
+            {
+                string msg = currentOverallBias == BiasColor.Bull ? "Bias alcista" :
+                             currentOverallBias == BiasColor.Bear ? "Bias bajista" : "Bias neutro";
+                try
+                {
+                    Alert("IBPFlip" + CurrentBar, Priority.High, msg, AlertSound, 0, Brushes.White, Brushes.Black);
+                }
+                catch { }
+                lastFlipBar = CurrentBar;
+                lastOverall = currentOverallBias;
+            }
+        }
+
+        protected override void OnMarketDepth(MarketDepthEventArgs e)
+        {
+            if (!UseLevel2Book)
+                return;
+
+            lock (bookLock)
+            {
+                SortedDictionary<int, double> book = e.MarketDataType == MarketDataType.Ask ? askSizes : bidSizes;
+
+                // --- reemplazo robusto sin MarketDepthOperation ---
+                string op = e.Operation != null ? e.Operation.ToString() : string.Empty; // "Add", "Update", "Remove", "Reset"
+
+                if (op == "Reset")
+                {
+                    book.Clear();
+                }
+                else if (op == "Add" || op == "Update")
+                {
+                    book[e.Position] = e.Volume;
+                }
+                else if (op == "Remove")
+                {
+                    if (book.ContainsKey(e.Position))
+                        book.Remove(e.Position);
+                }
+
+                totalBidSize = bidSizes.Values.Sum();
+                totalAskSize = askSizes.Values.Sum();
+            }
+        }
+
+        public override void OnRenderTargetChanged()
+        {
+            base.OnRenderTargetChanged();
+
+            DisposeBrush(ref bullBrush);
+            DisposeBrush(ref bearBrush);
+            DisposeBrush(ref neutralBrush);
+            DisposeBrush(ref textBrush);
+            DisposeBrush(ref panelBgBrush);
+            DisposeBrush(ref panelBorderBrush);
+
+            textFormat?.Dispose();
+            dwFactory?.Dispose();
+            bigTextFormat?.Dispose();
+            textFormat = null;
+            bigTextFormat = null;
+            dwFactory = null;
+
+            if (RenderTarget != null)
+            {
+                bullBrush        = CreateDxBrush(ColorBull);
+                bearBrush        = CreateDxBrush(ColorBear);
+                neutralBrush     = CreateDxBrush(ColorNeutral);
+                textBrush        = CreateDxBrush(TextColor);
+                panelBgBrush     = CreateDxBrush(PanelBgColor);
+                panelBorderBrush = CreateDxBrush(PanelBorderColor);
+
+                dwFactory = new SharpDX.DirectWrite.Factory();
+                textFormat = new SharpDX.DirectWrite.TextFormat(dwFactory, FontFamily, FontSize);
+                bigTextFormat = new SharpDX.DirectWrite.TextFormat(dwFactory, FontFamily, BigSignalSize);
+            }
+        }
+
+        private SharpDX.Direct2D1.SolidColorBrush CreateDxBrush(Brush wpf)
+        {
+            SolidColorBrush scb = wpf as SolidColorBrush ?? Brushes.White;
+            System.Windows.Media.Color c = scb.Color;
+            var col = new Color4(c.R / 255f, c.G / 255f, c.B / 255f, c.A / 255f);
+            return new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, col);
+        }
+
+        private SharpDX.Direct2D1.SolidColorBrush CreateDxBrushWithAlpha(Brush wpf, float alpha)
+        {
+            SolidColorBrush scb = wpf as SolidColorBrush ?? Brushes.White;
+            System.Windows.Media.Color c = scb.Color;
+            var col = new Color4(c.R / 255f, c.G / 255f, c.B / 255f, (c.A / 255f) * alpha);
+            return new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, col);
+        }
+
+        private void DisposeBrush(ref SharpDX.Direct2D1.Brush brush)
+        {
+            if (brush != null)
+            {
+                brush.Dispose();
+                brush = null;
+            }
+        }
+
+        protected override void OnRender(ChartControl chartControl, ChartScale chartScale)
+        {
+            base.OnRender(chartControl, chartScale);
+            if (RenderTarget == null)
+                return;
+
+            BiasColor vwapBias = currentVwapBias;
+            BiasColor deltaBias = currentDeltaBias;
+            BiasColor imbalanceBias = currentImbalanceBias;
+            BiasColor overallBias = currentOverallBias;
+
+            float x = PanelX;
+            float y = PanelY;
+            float w = PanelWidth;
+            float h = PanelHeight;
+
+            float ledSize = 20f;
+            float padding = 10f;
+            float lineHeight = 25f;
+
+            if (ShowBackgroundTint)
+            {
+                Brush baseBrush = overallBias == BiasColor.Bull ? ColorBull :
+                                   overallBias == BiasColor.Bear ? ColorBear : ColorNeutral;
+                using (var tint = CreateDxBrushWithAlpha(baseBrush, BackgroundOpacity / 100f))
+                {
+                    var full = new SharpDX.RectangleF(ChartPanel.X, ChartPanel.Y, ChartPanel.W, ChartPanel.H);
+                    RenderTarget.FillRectangle(full, tint);
+                }
+            }
+
+            var rect = new SharpDX.RectangleF(x, y, w, h);
+            var rounded = new SharpDX.Direct2D1.RoundedRectangle { Rect = rect, RadiusX = 5f, RadiusY = 5f };
+            RenderTarget.FillRoundedRectangle(rounded, panelBgBrush);
+            RenderTarget.DrawRoundedRectangle(rounded, panelBorderBrush, 1f);
+
+            string vwapNum = ((lastVwapDiffPct) * 100).ToString("+#0.00;-#0.00", CultureInfo.InvariantCulture) + " %";
+            string deltaNum = FormatSignedK(lastCumDelta) + (lastDeltaSlope > 0 ? " (↑)" : lastDeltaSlope < 0 ? " (↓)" : " (→)");
+            string imbNum = lastImbalanceRatio > 0 ?
+                string.Format(CultureInfo.InvariantCulture, "{0:0.00}x Buys / {1:0.00}x Sells", lastImbalanceRatio, 1 / lastImbalanceRatio) :
+                "0.00x";
+
+            DrawIndicatorState("VWAP", vwapBias, ShowNumbers ? vwapNum : null, x + padding, y + padding, ledSize, lineHeight);
+            DrawIndicatorState("Delta", deltaBias, ShowNumbers ? deltaNum : null, x + padding, y + padding + lineHeight, ledSize, lineHeight);
+            DrawIndicatorState("Imb", imbalanceBias, ShowNumbers ? imbNum : null, x + padding, y + padding + 2 * lineHeight, ledSize, lineHeight);
+
+            float topArea = padding + 3 * lineHeight;
+            float cx = x + w / 2f;
+            float cy = y + topArea + (h - topArea) / 2f;
+            float circleRadius = BigSignalSize / 2f;
+
+            if (ShowBigSignal)
+            {
+                var brush = GetBrushForBias(overallBias);
+                if (UseEmoji)
+                {
+                    string emoji = overallBias == BiasColor.Bull ? "🟢" : overallBias == BiasColor.Bear ? "🔴" : "🟡";
+                    var layoutEmoji = new SharpDX.DirectWrite.TextLayout(dwFactory, emoji, bigTextFormat, BigSignalSize * 2, BigSignalSize * 2);
+                    var posEmoji = new SharpDX.Vector2(cx - layoutEmoji.Metrics.Width / 2f, cy - layoutEmoji.Metrics.Height / 2f);
+                    RenderTarget.DrawTextLayout(posEmoji, layoutEmoji, brush);
+                    layoutEmoji.Dispose();
+                }
+                else
+                {
+                    var ellipse = new SharpDX.Direct2D1.Ellipse(new SharpDX.Vector2(cx, cy), circleRadius, circleRadius);
+                    RenderTarget.FillEllipse(ellipse, brush);
+                }
+            }
+
+            string biasText = overallBias == BiasColor.Bull ? "Bias alcista" : overallBias == BiasColor.Bear ? "Bias bajista" : "Bias neutro";
+            var layout = new SharpDX.DirectWrite.TextLayout(dwFactory, biasText, textFormat, 500, 50);
+            var textPos = new SharpDX.Vector2(cx - layout.Metrics.Width / 2f, cy + circleRadius + 5f);
+            RenderTarget.DrawTextLayout(textPos, layout, textBrush);
+            layout.Dispose();
+
+            if (ShowHistory && history != null && history.Count > 0)
+            {
+                float hx = x + w - padding - history.Count * 7f;
+                float hy = y + 2f;
+                int i = 0;
+                foreach (var b in history)
+                {
+                    var hb = GetBrushForBias(b);
+                    var r = new SharpDX.RectangleF(hx + i * 7f, hy, 5f, 5f);
+                    RenderTarget.FillRectangle(r, hb);
+                    i++;
+                }
+            }
+        }
+
+        private void DrawIndicatorState(string label, BiasColor bias, string number, float x, float y, float ledSize, float lineHeight)
+        {
+            var brush = GetBrushForBias(bias);
+            var rect = new SharpDX.RectangleF(x, y, ledSize, ledSize);
+            RenderTarget.FillRectangle(rect, brush);
+            RenderTarget.DrawRectangle(rect, panelBorderBrush);
+
+            var layoutLabel = new SharpDX.DirectWrite.TextLayout(dwFactory, label, textFormat, 200, lineHeight);
+            var textPosLabel = new SharpDX.Vector2(x + ledSize + 5f, y);
+            RenderTarget.DrawTextLayout(textPosLabel, layoutLabel, textBrush);
+
+            if (!string.IsNullOrEmpty(number))
+            {
+                var layoutNum = new SharpDX.DirectWrite.TextLayout(dwFactory, number, textFormat, 200, lineHeight);
+                var textPosNum = new SharpDX.Vector2(x + ledSize + 5f, y + layoutLabel.Metrics.Height);
+                RenderTarget.DrawTextLayout(textPosNum, layoutNum, textBrush);
+                layoutNum.Dispose();
+            }
+
+            layoutLabel.Dispose();
+        }
+
+        private SharpDX.Direct2D1.Brush GetBrushForBias(BiasColor bias)
+        {
+            switch (bias)
+            {
+                case BiasColor.Bull:
+                    return bullBrush;
+                case BiasColor.Bear:
+                    return bearBrush;
+                default:
+                    return neutralBrush;
+            }
+        }
+
+        private string FormatSignedK(double value)
+        {
+            double abs = Math.Abs(value);
+            string suffix = "";
+            double display = value;
+            if (abs >= 1_000_000)
+            {
+                display = value / 1_000_000d;
+                suffix = "m";
+            }
+            else if (abs >= 1000)
+            {
+                display = value / 1000d;
+                suffix = "k";
+            }
+            return display.ToString(value >= 0 ? "+0.##" : "-0.##", CultureInfo.InvariantCulture) + suffix;
+        }
+        #endregion
+
+        #region Evaluadores
+        private BiasColor EvaluateVWAP()
+        {
+            double c = Close[0];
+            double v = manualVwap;
+            double diff = v.ApproxCompare(0) == 0 ? 0 : (c - v) / v;
+            lastVwapDiffPct = diff;
+            if (Math.Abs(diff) <= VwapNearPct)
+                return BiasColor.Neutral;
+            return diff > 0 ? BiasColor.Bull : BiasColor.Bear;
+        }
+
+        private BiasColor EvaluateDelta()
+        {
+            lastCumDelta = manualCumDelta;
+            if (CurrentBar <= DeltaLookbackBars)
+            {
+                lastDeltaSlope = 0;
+                return BiasColor.Neutral;
+            }
+
+            double past = manualCumDeltaSeries[DeltaLookbackBars];
+            double slope = manualCumDelta - past;
+            lastDeltaSlope = slope;
+
+            if (manualCumDelta > 0 && slope > 0)
+                return BiasColor.Bull;
+            if (manualCumDelta < 0 && slope < 0)
+                return BiasColor.Bear;
+            return BiasColor.Neutral;
+        }
+
+        private BiasColor EvaluateImbalance()
+        {
+            double buys;
+            double sells;
+            if (UseLevel2Book)
+            {
+                lock (bookLock)
+                {
+                    buys = totalAskSize;
+                    sells = totalBidSize;
+                }
+            }
+            else
+            {
+                buys = aggressiveBuyVolume;
+                sells = aggressiveSellVolume;
+            }
+
+            if (buys == 0 && sells == 0)
+            {
+                lastImbalanceRatio = 0;
+                return BiasColor.Neutral;
+            }
+
+            double ratio = buys / Math.Max(sells, 1);
+            lastImbalanceRatio = ratio;
+            if (ratio >= 1 + ImbalancePct)
+                return BiasColor.Bull;
+            if (ratio <= 1 / (1 + ImbalancePct))
+                return BiasColor.Bear;
+            return BiasColor.Neutral;
+        }
+
+        private BiasColor EvaluateOverall(BiasColor vwapBias, BiasColor deltaBias, BiasColor imbalanceBias)
+        {
+            if (vwapBias == BiasColor.Bull && deltaBias == BiasColor.Bull && imbalanceBias == BiasColor.Bull)
+                return BiasColor.Bull;
+            if (vwapBias == BiasColor.Bear && deltaBias == BiasColor.Bear && imbalanceBias == BiasColor.Bear)
+                return BiasColor.Bear;
+            return BiasColor.Neutral;
+        }
+        #endregion
+    }
+
+    /// <summary>
+    /// Métodos de extensión para comparaciones de dobles
+    /// </summary>
+    public static class DoubleExtensions
+    {
+        public static int ApproxCompare(this double value, double other, double epsilon = 1e-8)
+        {
+            double diff = value - other;
+            if (Math.Abs(diff) <= epsilon)
+                return 0;
+            return diff > 0 ? 1 : -1;
+        }
+    }
+}
+

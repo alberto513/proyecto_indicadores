@@ -1,0 +1,503 @@
+// AumentoV3_2 – Señales concurrentes + pacing a 4/h
+using System;
+using System.Globalization;
+using System.Collections.Generic;
+using System.Linq;
+using System.IO;
+using System.Windows.Media;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class AumentoV3_2 : Indicator
+    {
+        #region Parámetros
+        [NinjaScriptProperty] public int    SignalPoints      { get; set; } = 40;
+        [NinjaScriptProperty] public int    BiasEMA           { get; set; } = 34;
+        [NinjaScriptProperty] public double BiasSlopeMin      { get; set; } = 0.015;
+        [NinjaScriptProperty] public double EMADistMinATR     { get; set; } = 0.20;
+        [NinjaScriptProperty] public double EMADistMaxATR     { get; set; } = 1.20;
+        [NinjaScriptProperty] public double BodyContextRatio  { get; set; } = 0.35;
+        [NinjaScriptProperty] public double MaxOppWickRatio   { get; set; } = 0.30;
+        [NinjaScriptProperty] public int    VolSpikeLookback  { get; set; } = 20;
+        [NinjaScriptProperty] public int    ConsolidationBars { get; set; } = 12;
+        [NinjaScriptProperty] public int    ConsolidationRangeBoxes { get; set; } = 8;
+        [NinjaScriptProperty] public double ATR14vs100Min     { get; set; } = 0.90;
+        [NinjaScriptProperty] public int    AvoidOpenMinutes  { get; set; } = 15;
+        [NinjaScriptProperty] public int    CooldownBars      { get; set; } = 2;
+
+        // Filtros de hora/dirección
+        [NinjaScriptProperty] public bool   UseHourSideFilters { get; set; } = true;
+        [NinjaScriptProperty] public string LongOnlyHoursCsv  { get; set; } = "";
+        [NinjaScriptProperty] public string ShortOnlyHoursCsv { get; set; } = "";
+        [NinjaScriptProperty] public string BlockWindowsCsv   { get; set; } = "09:30-09:45";
+        [NinjaScriptProperty] public int    MinScoreToTrade   { get; set; } = 9;
+        [NinjaScriptProperty] public int    CooldownMinutes   { get; set; } = 5;
+        [NinjaScriptProperty] public bool   ConservativeTieBreak { get; set; } = true;
+        [NinjaScriptProperty] public double VolSpikeZ         { get; set; } = 2.0;
+        [NinjaScriptProperty] public double SlopeMinEMANorm   { get; set; } = 0.25;
+
+        // NUEVO: concurrencia + pacing
+        [NinjaScriptProperty] public bool   AllowOverlapSignals   { get; set; } = true;
+        [NinjaScriptProperty] public int    MaxConcurrentSignals  { get; set; } = 3;
+        [NinjaScriptProperty] public int    MinBarsBetweenSignals { get; set; } = 1;
+        [NinjaScriptProperty] public int    TargetSignalsPerHour  { get; set; } = 4;
+        [NinjaScriptProperty] public int    PacingLookbackMinutes { get; set; } = 60;
+        [NinjaScriptProperty] public int    MinScoreFloor         { get; set; } = 4;
+        [NinjaScriptProperty] public int    MinScoreCeil          { get; set; } = 12;
+        [NinjaScriptProperty] public double VolSpikeZFloor        { get; set; } = 0.8;
+        [NinjaScriptProperty] public double VolSpikeZCeil         { get; set; } = 3.0;
+        #endregion
+
+        #region Indicadores
+        private EMA emaBias, ema14;
+        private ATR atr14, atr100;
+        private MAX maxHigh;
+        private MIN minLow;
+        private Series<double> volD;
+        private SMA volSma;
+        private StdDev volStd;
+        #endregion
+
+        #region Estado
+        private CultureInfo es = CultureInfo.GetCultureInfo("es-ES");
+        private DateTime sessionStart, lastTradeTime = DateTime.MinValue;
+        private int lastSignalBar = -1000, lastSignalBarLong = -1000, lastSignalBarShort = -1000;
+
+        private int tot, win, loss, pnlTicks;
+
+        private class SignalData
+        {
+            public string Id;
+            public int SignalBar, CreatedBar;
+            public bool IsLong, InTrade, Done;
+            public double Entry, TP, SL;
+            public DateTime SignalTime;
+            public double SignalPrice;
+        }
+        private List<SignalData> trades = new List<SignalData>();
+
+        private struct TimeWindow { public TimeSpan Start; public TimeSpan End; }
+        private HashSet<int> longHours, shortHours;
+        private List<TimeWindow> blockWindows;
+        private Queue<DateTime> signalTimes = new Queue<DateTime>();
+
+        private string logPath;
+
+        // Pacing dinámico (no modificamos la propiedad visible; usamos sombras internas)
+        private int dynMinScore;
+        private double dynVolZ;
+        #endregion
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "AumentoV3_2";
+                Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+                AddPlot(Brushes.Transparent, "Signal");
+            }
+            else if (State == State.DataLoaded)
+            {
+                emaBias = EMA(BiasEMA);
+                ema14   = EMA(14);
+                atr14   = ATR(14);
+                atr100  = ATR(100);
+                volD    = new Series<double>(this);
+                volSma  = SMA(volD, VolSpikeLookback);
+                volStd  = StdDev(volD, VolSpikeLookback);
+                maxHigh = MAX(High, ConsolidationBars);
+                minLow  = MIN(Low, ConsolidationBars);
+
+                longHours   = ParseHoursCsv(LongOnlyHoursCsv);
+                shortHours  = ParseHoursCsv(ShortOnlyHoursCsv);
+                blockWindows = ParseBlockWindows(BlockWindowsCsv);
+
+                dynMinScore = MinScoreToTrade;
+                dynVolZ     = VolSpikeZ;
+
+                logPath = Path.Combine(NinjaTrader.Core.Globals.UserDataDir, "AumentoV3_2_log.csv");
+                try
+                {
+                    if (!File.Exists(logPath))
+                        File.AppendAllText(logPath, "Time,ID,Side,Entry,TP,SL,Result,DurationMin,Bars\n");
+                }
+                catch (Exception ex) { Print("Log init error: " + ex.Message); }
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            volD[0] = Volume[0];
+            if (CurrentBar < Math.Max(100, Math.Max(VolSpikeLookback, ConsolidationBars) + 5))
+                return;
+
+            if (Bars.IsFirstBarOfSession)
+                sessionStart = Time[0];
+            if ((Time[0] - sessionStart).TotalMinutes < AvoidOpenMinutes)
+                return;
+
+            Values[0][0] = 0;
+
+            // 1) Gestionar todos los trades abiertos
+            ManageOpenTrades();
+
+            // 2) Opcional: bloquear generación si no se permiten overlaps
+            if (!AllowOverlapSignals && trades.Any(t => t.InTrade && !t.Done))
+                return;
+
+            // 3) Respetar ventanas de bloqueo/ cooldown
+            if (IsBlockedByTime(Time[0].TimeOfDay))
+                return;
+
+            if (CurrentBar <= lastSignalBar + Math.Max(MinBarsBetweenSignals, CooldownBars))
+                return;
+
+            if ((Time[0] - lastTradeTime).TotalMinutes < CooldownMinutes)
+                return;
+
+            if (IsConsolidating())
+                return;
+
+            // 4) Features
+            double atr = atr14[0];
+            double emaBiasV = emaBias[0];
+            double distATR = Math.Abs(Close[0] - emaBiasV) / atr;
+
+            int volPts = VolSpikePoints();
+            int distPts = DistToEmaPoints(distATR);
+            int biasLongPts  = BiasPoints(true);
+            int biasShortPts = BiasPoints(false);
+            int slopeLongPts  = SlopePoints(true);
+            int slopeShortPts = SlopePoints(false);
+            int patternLongPts  = CandlePatternPoints(true);
+            int patternShortPts = CandlePatternPoints(false);
+
+            int scoreLong  = biasLongPts + volPts + slopeLongPts + distPts + patternLongPts;
+            int scoreShort = biasShortPts + volPts + slopeShortPts + distPts + patternShortPts;
+
+            // 5) Reglas básicas + filtros horarios
+            bool longOK  = biasLongPts > 0 && scoreLong  >= dynMinScore && (volPts == 2 || patternLongPts == 2);
+            bool shortOK = biasShortPts > 0 && scoreShort >= dynMinScore && (volPts == 2 || patternShortPts == 2);
+
+            int hour = Time[0].Hour;
+            if (UseHourSideFilters)
+            {
+                if (longOK  && !PassesHourSide(hour, true))  longOK  = false;
+                if (shortOK && !PassesHourSide(hour, false)) shortOK = false;
+                if (!longOK && !shortOK) return;
+            }
+
+            // 6) Pick por score; empate → pendiente EMA14 normalizada
+            bool picked = false, isLong = false;
+            if (longOK && !shortOK)               { picked = true; isLong = true; }
+            else if (shortOK && !longOK)          { picked = true; isLong = false; }
+            else if (longOK && shortOK)
+            {
+                if (scoreLong > scoreShort)       { picked = true; isLong = true; }
+                else if (scoreShort > scoreLong)  { picked = true; isLong = false; }
+                else
+                {
+                    double slopeNorm = (ema14[0] - ema14[3]) / (3 * atr14[0]);
+                    picked = true; isLong = slopeNorm >= 0;
+                }
+            }
+            if (!picked) return;
+
+            // 7) Cap de concurrencia
+            if (trades.Count(t => t.InTrade && !t.Done) >= MaxConcurrentSignals)
+                return;
+
+            // 8) Crear señal
+            var id = $"{Time[0]:HHmmss}_{CurrentBar}";
+            var brush = isLong ? Brushes.LimeGreen : Brushes.IndianRed;
+            Draw.VerticalLine(this, "AumV3_2VL_" + CurrentBar + "_" + id, 0, brush);
+            if (isLong)
+                Draw.ArrowUp(this, "AumV3_2Up_" + CurrentBar + "_" + id, true, 0, Low[0] - TickSize, brush);
+            else
+                Draw.ArrowDown(this, "AumV3_2Dn_" + CurrentBar + "_" + id, true, 0, High[0] + TickSize, brush);
+
+            var sig = new SignalData
+            {
+                Id          = id,
+                SignalBar   = CurrentBar,
+                CreatedBar  = CurrentBar,
+                IsLong      = isLong,
+                InTrade     = false,
+                Done        = false,
+                SignalTime  = Time[0],
+                SignalPrice = Close[0]
+            };
+            trades.Add(sig);
+            Values[0][0] = 1;
+
+            lastSignalBar = CurrentBar;
+            if (isLong) lastSignalBarLong = CurrentBar; else lastSignalBarShort = CurrentBar;
+
+            // 9) Registrar pacing
+            signalTimes.Enqueue(Time[0]);
+            while (signalTimes.Count > 0 && signalTimes.Peek() < Time[0].AddMinutes(-PacingLookbackMinutes))
+                signalTimes.Dequeue();
+            ApplyPacing();
+
+            // Nota: Entry/TP/SL se setean en ManageOpenTrades() en la barra siguiente
+        }
+
+        #region Módulos de Puntaje
+        private int BiasPoints(bool isLong)
+        {
+            double slope = Slope(emaBias, 5, 0);
+            if (isLong && Close[0] > emaBias[0] && slope >= BiasSlopeMin) return 2;
+            if (!isLong && Close[0] < emaBias[0] && slope <= -BiasSlopeMin) return 2;
+            return 0;
+        }
+
+        private int VolSpikePoints()
+        {
+            double mean = volSma[1];
+            double std = volStd[1];
+            double z = (Volume[0] - mean) / (std + 1e-9);
+            return z >= dynVolZ ? 2 : 0;
+        }
+
+        private int SlopePoints(bool isLong)
+        {
+            double slopeNorm = (ema14[0] - ema14[5]) / (5 * atr14[0]);
+            if (isLong && slopeNorm >= SlopeMinEMANorm) return 2;
+            if (!isLong && slopeNorm <= -SlopeMinEMANorm) return 2;
+            return 0;
+        }
+
+        private int DistToEmaPoints(double distATR)
+        {
+            return (distATR >= EMADistMinATR && distATR <= EMADistMaxATR) ? 2 : 0;
+        }
+
+        private int CandlePatternPoints(bool isLong)
+        {
+            double range = High[0] - Low[0];
+            if (range == 0) return 0;
+            double body = Math.Abs(Close[0] - Open[0]);
+            double upperWick = High[0] - Math.Max(Open[0], Close[0]);
+            double lowerWick = Math.Min(Open[0], Close[0]) - Low[0];
+
+            if (isLong)
+            {
+                if (Close[0] > Open[0] && body >= range * BodyContextRatio && lowerWick <= range * MaxOppWickRatio)
+                    return 2;
+            }
+            else
+            {
+                if (Close[0] < Open[0] && body >= range * BodyContextRatio && upperWick <= range * MaxOppWickRatio)
+                    return 2;
+            }
+            return 0;
+        }
+
+        private bool IsConsolidating()
+        {
+            double rangeN = maxHigh[0] - minLow[0];
+            bool atrLow = atr14[0] < ATR14vs100Min * atr100[0];
+            double boxTicks = BarsPeriod.BarsPeriodType == BarsPeriodType.Renko ? BarsPeriod.Value : 0;
+            bool rangeBoxesLow;
+            if (boxTicks > 0)
+                rangeBoxesLow = rangeN <= ConsolidationRangeBoxes * Instrument.MasterInstrument.TickSize * boxTicks;
+            else
+                rangeBoxesLow = rangeN <= 0.25 * atr14[0];
+            return atrLow || rangeBoxesLow;
+        }
+        #endregion
+
+        #region Gestión de trades (multi)
+        private void ManageOpenTrades()
+        {
+            if (trades.Count == 0) return;
+
+            foreach (var t in trades.ToList())
+            {
+                if (!t.InTrade && CurrentBar >= t.SignalBar + 1)
+                {
+                    t.Entry = Open[0];
+                    double r = SignalPoints * TickSize;
+                    if (t.IsLong) { t.TP = t.Entry + r; t.SL = t.Entry - r; }
+                    else          { t.TP = t.Entry - r; t.SL = t.Entry + r; }
+                    t.InTrade = true;
+
+                    Print($"{(t.IsLong ? "LONG" : "SHORT")}={t.SignalTime:HH:mm:ss} ID={t.Id} - Señal {t.SignalPrice.ToString("0.00", es)} Entrada={t.Entry.ToString("0.00", es)} - TP={t.TP.ToString("0.00", es)} - SL={t.SL.ToString("0.00", es)} - Resultado=EN_CURSO");
+                    continue;
+                }
+
+                if (!t.InTrade || t.Done) continue;
+
+                bool hitTP = t.IsLong ? High[0] >= t.TP : Low[0] <= t.TP;
+                bool hitSL = t.IsLong ? Low[0] <= t.SL : High[0] >= t.SL;
+
+                if (!(hitTP || hitSL)) continue;
+
+                string res = ResolveHit(hitTP, hitSL, t);
+                double exitPrice = res == "TP" ? t.TP : t.SL;
+
+                tot++;
+                if (res == "TP") win++; else loss++;
+
+                int ticks = (int)Math.Round(Math.Abs(exitPrice - t.Entry) / TickSize);
+                pnlTicks += res == "TP" ? +ticks : -ticks;
+
+                Print($"{(t.IsLong ? "LONG" : "SHORT")}={t.SignalTime:HH:mm:ss} ID={t.Id} - Señal {t.SignalPrice.ToString("0.00", es)} Entrada={t.Entry.ToString("0.00", es)} - TP={t.TP.ToString("0.00", es)} - SL={t.SL.ToString("0.00", es)} - Resultado={res}");
+                PrintStat();
+
+                TimeSpan dur = Time[0] - t.SignalTime;
+                int bars = CurrentBar - t.SignalBar;
+                string line = string.Format(CultureInfo.InvariantCulture,
+                    "{0:yyyy-MM-dd HH:mm:ss},{1},{2},{3:0.00},{4:0.00},{5:0.00},{6},{7:F1},{8}\n",
+                    t.SignalTime, t.Id, (t.IsLong ? "LONG" : "SHORT"), t.Entry, t.TP, t.SL, res, dur.TotalMinutes, bars);
+                try { File.AppendAllText(logPath, line); } catch (Exception ex) { Print("Log write error: " + ex.Message); }
+
+                lastTradeTime = Time[0];
+                t.Done = true;
+                trades.Remove(t);
+            }
+        }
+
+        private string ResolveHit(bool hitTP, bool hitSL, SignalData t)
+        {
+            if (hitTP && hitSL)
+            {
+                if (ConservativeTieBreak) return "SL";
+                double distTP = Math.Abs(t.Entry - t.TP);
+                double distSL = Math.Abs(t.Entry - t.SL);
+                return distTP <= distSL ? "TP" : "SL";
+            }
+            return hitTP ? "TP" : "SL";
+        }
+        #endregion
+
+        #region Utilidades
+        private bool IsBlockedByTime(TimeSpan now)
+        {
+            foreach (var w in blockWindows)
+                if (now >= w.Start && now <= w.End)
+                    return true;
+            return false;
+        }
+
+        private bool PassesHourSide(int hour, bool isLong)
+        {
+            if (!UseHourSideFilters) return true;
+            var set = isLong ? longHours : shortHours;
+            if (set == null || set.Count == 0) return true;
+            return set.Contains(hour);
+        }
+
+        private HashSet<int> ParseHoursCsv(string csv)
+        {
+            var set = new HashSet<int>();
+            if (string.IsNullOrWhiteSpace(csv)) return set;
+            foreach (var part in csv.Split(','))
+                if (int.TryParse(part.Trim(), out int h) && h >= 0 && h <= 23)
+                    set.Add(h);
+            return set;
+        }
+
+        private List<TimeWindow> ParseBlockWindows(string csv)
+        {
+            var list = new List<TimeWindow>();
+            if (string.IsNullOrWhiteSpace(csv)) return list;
+            foreach (var r in csv.Split(';'))
+            {
+                var parts = r.Split('-');
+                if (parts.Length == 2 && TimeSpan.TryParse(parts[0], out var s) && TimeSpan.TryParse(parts[1], out var e))
+                    list.Add(new TimeWindow { Start = s, End = e });
+            }
+            return list;
+        }
+
+        private void ApplyPacing()
+        {
+            if (TargetSignalsPerHour <= 0 || PacingLookbackMinutes <= 0) { dynMinScore = MinScoreToTrade; dynVolZ = VolSpikeZ; return; }
+
+            double rate = signalTimes.Count / (double)PacingLookbackMinutes * 60.0; // señales/h
+            dynMinScore = MinScoreToTrade;
+            dynVolZ     = VolSpikeZ;
+
+            if (rate < TargetSignalsPerHour)
+            {
+                dynMinScore = Math.Max(MinScoreFloor, dynMinScore - 1);
+                dynVolZ     = Math.Max(VolSpikeZFloor, dynVolZ - 0.2);
+            }
+            else if (rate > TargetSignalsPerHour)
+            {
+                dynMinScore = Math.Min(MinScoreCeil, dynMinScore + 1);
+                dynVolZ     = Math.Min(VolSpikeZCeil, dynVolZ + 0.2);
+            }
+        }
+
+        private void PrintStat()
+        {
+            double wr = tot > 0 ? (double)win / tot * 100.0 : 0.0;
+            Print($"Trades={tot} Win={win} Loss={loss} WinRate={wr:F1}% PnL={pnlTicks:+#;-#;0} ticks");
+        }
+        #endregion
+    }
+}
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private AumentoV3_2[] cacheAumentoV3_2;
+		public AumentoV3_2 AumentoV3_2(int signalPoints, int biasEMA, double biasSlopeMin, double eMADistMinATR, double eMADistMaxATR, double bodyContextRatio, double maxOppWickRatio, int volSpikeLookback, int consolidationBars, int consolidationRangeBoxes, double aTR14vs100Min, int avoidOpenMinutes, int cooldownBars, bool useHourSideFilters, string longOnlyHoursCsv, string shortOnlyHoursCsv, string blockWindowsCsv, int minScoreToTrade, int cooldownMinutes, bool conservativeTieBreak, double volSpikeZ, double slopeMinEMANorm, bool allowOverlapSignals, int maxConcurrentSignals, int minBarsBetweenSignals, int targetSignalsPerHour, int pacingLookbackMinutes, int minScoreFloor, int minScoreCeil, double volSpikeZFloor, double volSpikeZCeil)
+		{
+			return AumentoV3_2(Input, signalPoints, biasEMA, biasSlopeMin, eMADistMinATR, eMADistMaxATR, bodyContextRatio, maxOppWickRatio, volSpikeLookback, consolidationBars, consolidationRangeBoxes, aTR14vs100Min, avoidOpenMinutes, cooldownBars, useHourSideFilters, longOnlyHoursCsv, shortOnlyHoursCsv, blockWindowsCsv, minScoreToTrade, cooldownMinutes, conservativeTieBreak, volSpikeZ, slopeMinEMANorm, allowOverlapSignals, maxConcurrentSignals, minBarsBetweenSignals, targetSignalsPerHour, pacingLookbackMinutes, minScoreFloor, minScoreCeil, volSpikeZFloor, volSpikeZCeil);
+		}
+
+		public AumentoV3_2 AumentoV3_2(ISeries<double> input, int signalPoints, int biasEMA, double biasSlopeMin, double eMADistMinATR, double eMADistMaxATR, double bodyContextRatio, double maxOppWickRatio, int volSpikeLookback, int consolidationBars, int consolidationRangeBoxes, double aTR14vs100Min, int avoidOpenMinutes, int cooldownBars, bool useHourSideFilters, string longOnlyHoursCsv, string shortOnlyHoursCsv, string blockWindowsCsv, int minScoreToTrade, int cooldownMinutes, bool conservativeTieBreak, double volSpikeZ, double slopeMinEMANorm, bool allowOverlapSignals, int maxConcurrentSignals, int minBarsBetweenSignals, int targetSignalsPerHour, int pacingLookbackMinutes, int minScoreFloor, int minScoreCeil, double volSpikeZFloor, double volSpikeZCeil)
+		{
+			if (cacheAumentoV3_2 != null)
+				for (int idx = 0; idx < cacheAumentoV3_2.Length; idx++)
+					if (cacheAumentoV3_2[idx] != null && cacheAumentoV3_2[idx].SignalPoints == signalPoints && cacheAumentoV3_2[idx].BiasEMA == biasEMA && cacheAumentoV3_2[idx].BiasSlopeMin == biasSlopeMin && cacheAumentoV3_2[idx].EMADistMinATR == eMADistMinATR && cacheAumentoV3_2[idx].EMADistMaxATR == eMADistMaxATR && cacheAumentoV3_2[idx].BodyContextRatio == bodyContextRatio && cacheAumentoV3_2[idx].MaxOppWickRatio == maxOppWickRatio && cacheAumentoV3_2[idx].VolSpikeLookback == volSpikeLookback && cacheAumentoV3_2[idx].ConsolidationBars == consolidationBars && cacheAumentoV3_2[idx].ConsolidationRangeBoxes == consolidationRangeBoxes && cacheAumentoV3_2[idx].ATR14vs100Min == aTR14vs100Min && cacheAumentoV3_2[idx].AvoidOpenMinutes == avoidOpenMinutes && cacheAumentoV3_2[idx].CooldownBars == cooldownBars && cacheAumentoV3_2[idx].UseHourSideFilters == useHourSideFilters && cacheAumentoV3_2[idx].LongOnlyHoursCsv == longOnlyHoursCsv && cacheAumentoV3_2[idx].ShortOnlyHoursCsv == shortOnlyHoursCsv && cacheAumentoV3_2[idx].BlockWindowsCsv == blockWindowsCsv && cacheAumentoV3_2[idx].MinScoreToTrade == minScoreToTrade && cacheAumentoV3_2[idx].CooldownMinutes == cooldownMinutes && cacheAumentoV3_2[idx].ConservativeTieBreak == conservativeTieBreak && cacheAumentoV3_2[idx].VolSpikeZ == volSpikeZ && cacheAumentoV3_2[idx].SlopeMinEMANorm == slopeMinEMANorm && cacheAumentoV3_2[idx].AllowOverlapSignals == allowOverlapSignals && cacheAumentoV3_2[idx].MaxConcurrentSignals == maxConcurrentSignals && cacheAumentoV3_2[idx].MinBarsBetweenSignals == minBarsBetweenSignals && cacheAumentoV3_2[idx].TargetSignalsPerHour == targetSignalsPerHour && cacheAumentoV3_2[idx].PacingLookbackMinutes == pacingLookbackMinutes && cacheAumentoV3_2[idx].MinScoreFloor == minScoreFloor && cacheAumentoV3_2[idx].MinScoreCeil == minScoreCeil && cacheAumentoV3_2[idx].VolSpikeZFloor == volSpikeZFloor && cacheAumentoV3_2[idx].VolSpikeZCeil == volSpikeZCeil && cacheAumentoV3_2[idx].EqualsInput(input))
+						return cacheAumentoV3_2[idx];
+			return CacheIndicator<AumentoV3_2>(new AumentoV3_2(){ SignalPoints = signalPoints, BiasEMA = biasEMA, BiasSlopeMin = biasSlopeMin, EMADistMinATR = eMADistMinATR, EMADistMaxATR = eMADistMaxATR, BodyContextRatio = bodyContextRatio, MaxOppWickRatio = maxOppWickRatio, VolSpikeLookback = volSpikeLookback, ConsolidationBars = consolidationBars, ConsolidationRangeBoxes = consolidationRangeBoxes, ATR14vs100Min = aTR14vs100Min, AvoidOpenMinutes = avoidOpenMinutes, CooldownBars = cooldownBars, UseHourSideFilters = useHourSideFilters, LongOnlyHoursCsv = longOnlyHoursCsv, ShortOnlyHoursCsv = shortOnlyHoursCsv, BlockWindowsCsv = blockWindowsCsv, MinScoreToTrade = minScoreToTrade, CooldownMinutes = cooldownMinutes, ConservativeTieBreak = conservativeTieBreak, VolSpikeZ = volSpikeZ, SlopeMinEMANorm = slopeMinEMANorm, AllowOverlapSignals = allowOverlapSignals, MaxConcurrentSignals = maxConcurrentSignals, MinBarsBetweenSignals = minBarsBetweenSignals, TargetSignalsPerHour = targetSignalsPerHour, PacingLookbackMinutes = pacingLookbackMinutes, MinScoreFloor = minScoreFloor, MinScoreCeil = minScoreCeil, VolSpikeZFloor = volSpikeZFloor, VolSpikeZCeil = volSpikeZCeil }, input, ref cacheAumentoV3_2);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.AumentoV3_2 AumentoV3_2(int signalPoints, int biasEMA, double biasSlopeMin, double eMADistMinATR, double eMADistMaxATR, double bodyContextRatio, double maxOppWickRatio, int volSpikeLookback, int consolidationBars, int consolidationRangeBoxes, double aTR14vs100Min, int avoidOpenMinutes, int cooldownBars, bool useHourSideFilters, string longOnlyHoursCsv, string shortOnlyHoursCsv, string blockWindowsCsv, int minScoreToTrade, int cooldownMinutes, bool conservativeTieBreak, double volSpikeZ, double slopeMinEMANorm, bool allowOverlapSignals, int maxConcurrentSignals, int minBarsBetweenSignals, int targetSignalsPerHour, int pacingLookbackMinutes, int minScoreFloor, int minScoreCeil, double volSpikeZFloor, double volSpikeZCeil)
+		{
+			return indicator.AumentoV3_2(Input, signalPoints, biasEMA, biasSlopeMin, eMADistMinATR, eMADistMaxATR, bodyContextRatio, maxOppWickRatio, volSpikeLookback, consolidationBars, consolidationRangeBoxes, aTR14vs100Min, avoidOpenMinutes, cooldownBars, useHourSideFilters, longOnlyHoursCsv, shortOnlyHoursCsv, blockWindowsCsv, minScoreToTrade, cooldownMinutes, conservativeTieBreak, volSpikeZ, slopeMinEMANorm, allowOverlapSignals, maxConcurrentSignals, minBarsBetweenSignals, targetSignalsPerHour, pacingLookbackMinutes, minScoreFloor, minScoreCeil, volSpikeZFloor, volSpikeZCeil);
+		}
+
+		public Indicators.AumentoV3_2 AumentoV3_2(ISeries<double> input , int signalPoints, int biasEMA, double biasSlopeMin, double eMADistMinATR, double eMADistMaxATR, double bodyContextRatio, double maxOppWickRatio, int volSpikeLookback, int consolidationBars, int consolidationRangeBoxes, double aTR14vs100Min, int avoidOpenMinutes, int cooldownBars, bool useHourSideFilters, string longOnlyHoursCsv, string shortOnlyHoursCsv, string blockWindowsCsv, int minScoreToTrade, int cooldownMinutes, bool conservativeTieBreak, double volSpikeZ, double slopeMinEMANorm, bool allowOverlapSignals, int maxConcurrentSignals, int minBarsBetweenSignals, int targetSignalsPerHour, int pacingLookbackMinutes, int minScoreFloor, int minScoreCeil, double volSpikeZFloor, double volSpikeZCeil)
+		{
+			return indicator.AumentoV3_2(input, signalPoints, biasEMA, biasSlopeMin, eMADistMinATR, eMADistMaxATR, bodyContextRatio, maxOppWickRatio, volSpikeLookback, consolidationBars, consolidationRangeBoxes, aTR14vs100Min, avoidOpenMinutes, cooldownBars, useHourSideFilters, longOnlyHoursCsv, shortOnlyHoursCsv, blockWindowsCsv, minScoreToTrade, cooldownMinutes, conservativeTieBreak, volSpikeZ, slopeMinEMANorm, allowOverlapSignals, maxConcurrentSignals, minBarsBetweenSignals, targetSignalsPerHour, pacingLookbackMinutes, minScoreFloor, minScoreCeil, volSpikeZFloor, volSpikeZCeil);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.AumentoV3_2 AumentoV3_2(int signalPoints, int biasEMA, double biasSlopeMin, double eMADistMinATR, double eMADistMaxATR, double bodyContextRatio, double maxOppWickRatio, int volSpikeLookback, int consolidationBars, int consolidationRangeBoxes, double aTR14vs100Min, int avoidOpenMinutes, int cooldownBars, bool useHourSideFilters, string longOnlyHoursCsv, string shortOnlyHoursCsv, string blockWindowsCsv, int minScoreToTrade, int cooldownMinutes, bool conservativeTieBreak, double volSpikeZ, double slopeMinEMANorm, bool allowOverlapSignals, int maxConcurrentSignals, int minBarsBetweenSignals, int targetSignalsPerHour, int pacingLookbackMinutes, int minScoreFloor, int minScoreCeil, double volSpikeZFloor, double volSpikeZCeil)
+		{
+			return indicator.AumentoV3_2(Input, signalPoints, biasEMA, biasSlopeMin, eMADistMinATR, eMADistMaxATR, bodyContextRatio, maxOppWickRatio, volSpikeLookback, consolidationBars, consolidationRangeBoxes, aTR14vs100Min, avoidOpenMinutes, cooldownBars, useHourSideFilters, longOnlyHoursCsv, shortOnlyHoursCsv, blockWindowsCsv, minScoreToTrade, cooldownMinutes, conservativeTieBreak, volSpikeZ, slopeMinEMANorm, allowOverlapSignals, maxConcurrentSignals, minBarsBetweenSignals, targetSignalsPerHour, pacingLookbackMinutes, minScoreFloor, minScoreCeil, volSpikeZFloor, volSpikeZCeil);
+		}
+
+		public Indicators.AumentoV3_2 AumentoV3_2(ISeries<double> input , int signalPoints, int biasEMA, double biasSlopeMin, double eMADistMinATR, double eMADistMaxATR, double bodyContextRatio, double maxOppWickRatio, int volSpikeLookback, int consolidationBars, int consolidationRangeBoxes, double aTR14vs100Min, int avoidOpenMinutes, int cooldownBars, bool useHourSideFilters, string longOnlyHoursCsv, string shortOnlyHoursCsv, string blockWindowsCsv, int minScoreToTrade, int cooldownMinutes, bool conservativeTieBreak, double volSpikeZ, double slopeMinEMANorm, bool allowOverlapSignals, int maxConcurrentSignals, int minBarsBetweenSignals, int targetSignalsPerHour, int pacingLookbackMinutes, int minScoreFloor, int minScoreCeil, double volSpikeZFloor, double volSpikeZCeil)
+		{
+			return indicator.AumentoV3_2(input, signalPoints, biasEMA, biasSlopeMin, eMADistMinATR, eMADistMaxATR, bodyContextRatio, maxOppWickRatio, volSpikeLookback, consolidationBars, consolidationRangeBoxes, aTR14vs100Min, avoidOpenMinutes, cooldownBars, useHourSideFilters, longOnlyHoursCsv, shortOnlyHoursCsv, blockWindowsCsv, minScoreToTrade, cooldownMinutes, conservativeTieBreak, volSpikeZ, slopeMinEMANorm, allowOverlapSignals, maxConcurrentSignals, minBarsBetweenSignals, targetSignalsPerHour, pacingLookbackMinutes, minScoreFloor, minScoreCeil, volSpikeZFloor, volSpikeZCeil);
+		}
+	}
+}
+
+#endregion

@@ -1,0 +1,237 @@
+using System;
+using System.Windows.Media;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+using NinjaTrader.Data;
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class MagnoFluxScalper_v6_Pro : Indicator
+    {
+        [NinjaScriptProperty]
+        public int CooldownBars { get; set; } = 1;
+
+        [NinjaScriptProperty]
+        public int SignalPoints { get; set; } = 40;
+
+        [NinjaScriptProperty]
+        public double VolumeThreshold { get; set; } = 1.5;
+
+        [NinjaScriptProperty]
+        public double SlopeMin { get; set; } = 0.035;
+
+        [NinjaScriptProperty]
+        public double BodyContextRatio { get; set; } = 0.4;
+
+        private EMA ema14;
+        private SMA volSma;
+        private int lastSignalBar = -1000;
+        private SignalData signal;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "MagnoFluxScalper_v6_Pro";
+                Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+                AddPlot(Brushes.Transparent, "Signal");
+            }
+            else if (State == State.DataLoaded)
+            {
+                ema14 = EMA(14);
+                volSma = SMA(Volume, 14);
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 20)
+                return;
+
+            if (signal != null)
+            {
+                ManageTrade();
+                return;
+            }
+
+            if (CurrentBar <= lastSignalBar + CooldownBars)
+                return;
+
+            if (IsLongSetup())
+                CreateSignal(true);
+            else if (IsShortSetup())
+                CreateSignal(false);
+        }
+
+        private bool IsLongSetup()
+        {
+            bool c1 = Close[0] > ema14[0];
+            bool c2 = Volume[0] > volSma[0] * VolumeThreshold;
+            bool c3 = (ema14[0] - ema14[3]) / (3 * TickSize) > SlopeMin;
+            bool c4 = Math.Abs(Close[0] - Open[0]) > (High[0] - Low[0]) * BodyContextRatio;
+            int count = (c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0) + (c4 ? 1 : 0);
+            return count >= 3 && Close[0] > Open[0];
+        }
+
+        private bool IsShortSetup()
+        {
+            bool c1 = Close[0] < ema14[0];
+            bool c2 = Volume[0] > volSma[0] * VolumeThreshold;
+            bool c3 = (ema14[0] - ema14[3]) / (3 * TickSize) < -SlopeMin;
+            bool c4 = Math.Abs(Close[0] - Open[0]) > (High[0] - Low[0]) * BodyContextRatio;
+            int count = (c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0) + (c4 ? 1 : 0);
+            return count >= 3 && Close[0] < Open[0];
+        }
+
+        private void CreateSignal(bool isLong)
+        {
+            signal = new SignalData
+            {
+                SignalTime = Time[0],
+                IsLong = isLong,
+                InTrade = false
+            };
+
+            if (isLong)
+            {
+                Draw.ArrowUp(this, "v6Long_" + CurrentBar, true, 0, Low[0] - TickSize, Brushes.Lime);
+                Draw.VerticalLine(this, "v6LongLine_" + CurrentBar, 0, Brushes.Lime);
+            }
+            else
+            {
+                Draw.ArrowDown(this, "v6Short_" + CurrentBar, true, 0, High[0] + TickSize, Brushes.Red);
+                Draw.VerticalLine(this, "v6ShortLine_" + CurrentBar, 0, Brushes.Red);
+            }
+
+            lastSignalBar = CurrentBar;
+        }
+
+        private void ManageTrade()
+        {
+            int entryBar = lastSignalBar + 1;
+            if (!signal.InTrade && CurrentBar >= entryBar)
+            {
+                signal.EntryPrice = Open[0];
+                double ticks = SignalPoints * TickSize;
+                if (signal.IsLong)
+                {
+                    signal.TP = signal.EntryPrice + ticks;
+                    signal.SL = signal.EntryPrice - ticks;
+                }
+                else
+                {
+                    signal.TP = signal.EntryPrice - ticks;
+                    signal.SL = signal.EntryPrice + ticks;
+                }
+                signal.InTrade = true;
+            }
+            else if (signal.InTrade && CurrentBar > entryBar)
+            {
+                bool closeTrade = false;
+                string result = string.Empty;
+                if (signal.IsLong)
+                {
+                    if (High[0] >= signal.TP)
+                    {
+                        result = "TP";
+                        closeTrade = true;
+                    }
+                    else if (Low[0] <= signal.SL)
+                    {
+                        result = "SL";
+                        closeTrade = true;
+                    }
+                }
+                else
+                {
+                    if (Low[0] <= signal.TP)
+                    {
+                        result = "TP";
+                        closeTrade = true;
+                    }
+                    else if (High[0] >= signal.SL)
+                    {
+                        result = "SL";
+                        closeTrade = true;
+                    }
+                }
+
+                if (closeTrade)
+                {
+                    Print($"{(signal.IsLong ? "LONG" : "SHORT")}={signal.SignalTime:HH:mm:ss} - Señal {Close[lastSignalBar]:0.00} Entrada={signal.EntryPrice:0.00} - TP={signal.TP:0.00} - SL={signal.SL:0.00} - Resultado={result}");
+                    signal = null;
+                }
+            }
+        }
+
+        private class SignalData
+        {
+            public DateTime SignalTime;
+            public double EntryPrice;
+            public double TP;
+            public double SL;
+            public bool IsLong;
+            public bool InTrade;
+        }
+    }
+}
+
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private MagnoFluxScalper_v6_Pro[] cacheMagnoFluxScalper_v6_Pro;
+		public MagnoFluxScalper_v6_Pro MagnoFluxScalper_v6_Pro(int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio)
+		{
+			return MagnoFluxScalper_v6_Pro(Input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio);
+		}
+
+		public MagnoFluxScalper_v6_Pro MagnoFluxScalper_v6_Pro(ISeries<double> input, int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio)
+		{
+			if (cacheMagnoFluxScalper_v6_Pro != null)
+				for (int idx = 0; idx < cacheMagnoFluxScalper_v6_Pro.Length; idx++)
+					if (cacheMagnoFluxScalper_v6_Pro[idx] != null && cacheMagnoFluxScalper_v6_Pro[idx].CooldownBars == cooldownBars && cacheMagnoFluxScalper_v6_Pro[idx].SignalPoints == signalPoints && cacheMagnoFluxScalper_v6_Pro[idx].VolumeThreshold == volumeThreshold && cacheMagnoFluxScalper_v6_Pro[idx].SlopeMin == slopeMin && cacheMagnoFluxScalper_v6_Pro[idx].BodyContextRatio == bodyContextRatio && cacheMagnoFluxScalper_v6_Pro[idx].EqualsInput(input))
+						return cacheMagnoFluxScalper_v6_Pro[idx];
+			return CacheIndicator<MagnoFluxScalper_v6_Pro>(new MagnoFluxScalper_v6_Pro(){ CooldownBars = cooldownBars, SignalPoints = signalPoints, VolumeThreshold = volumeThreshold, SlopeMin = slopeMin, BodyContextRatio = bodyContextRatio }, input, ref cacheMagnoFluxScalper_v6_Pro);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.MagnoFluxScalper_v6_Pro MagnoFluxScalper_v6_Pro(int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio)
+		{
+			return indicator.MagnoFluxScalper_v6_Pro(Input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio);
+		}
+
+		public Indicators.MagnoFluxScalper_v6_Pro MagnoFluxScalper_v6_Pro(ISeries<double> input , int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio)
+		{
+			return indicator.MagnoFluxScalper_v6_Pro(input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.MagnoFluxScalper_v6_Pro MagnoFluxScalper_v6_Pro(int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio)
+		{
+			return indicator.MagnoFluxScalper_v6_Pro(Input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio);
+		}
+
+		public Indicators.MagnoFluxScalper_v6_Pro MagnoFluxScalper_v6_Pro(ISeries<double> input , int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio)
+		{
+			return indicator.MagnoFluxScalper_v6_Pro(input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio);
+		}
+	}
+}
+
+#endregion

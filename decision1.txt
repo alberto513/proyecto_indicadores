@@ -1,0 +1,226 @@
+using System;
+using System.IO;
+using System.Windows.Media;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+using NinjaTrader.Data;
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class MagnoDecisionScore_v1 : Indicator
+    {
+        [NinjaScriptProperty]
+        public int CooldownBars { get; set; } = 1;
+
+        [NinjaScriptProperty]
+        public int SignalPoints { get; set; } = 40;
+
+        [NinjaScriptProperty]
+        public double VolumeThreshold { get; set; } = 1.5;
+
+        [NinjaScriptProperty]
+        public double SlopeMin { get; set; } = 0.035;
+
+        [NinjaScriptProperty]
+        public double BodyContextRatio { get; set; } = 0.4;
+
+        [NinjaScriptProperty]
+        public int MinScoreToTrade { get; set; } = 5;
+
+        private EMA ema14;
+        private SMA volSma;
+        private SMA sma20;
+        private ATR atr14;
+        private MACD macd;
+        private int lastSignalBar = -1000;
+        private StreamWriter logW;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "MagnoDecisionScore_v1";
+                Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+                AddPlot(Brushes.Transparent, "DecisionPlot");
+            }
+            else if (State == State.DataLoaded)
+            {
+                ema14 = EMA(14);
+                volSma = SMA(Volume, 14);
+                sma20 = SMA(20);
+                atr14 = ATR(14);
+                macd = MACD(12, 26, 9);
+
+                string path = System.IO.Path.Combine(NinjaTrader.Core.Globals.UserDataDir, "MagnoDecisionScore_log.csv");
+                bool newFile = !File.Exists(path);
+                logW = new StreamWriter(path, true);
+                if (newFile)
+                    logW.WriteLine("Time,Dir,Entry,Score,Slope,VolRatio,BodyRatio,SpaceTicks,MACDHist,ExtDistTicks");
+            }
+            else if (State == State.Terminated)
+            {
+                if (logW != null)
+                {
+                    logW.Flush();
+                    logW.Close();
+                    logW = null;
+                }
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 20)
+                return;
+
+            if (CurrentBar <= lastSignalBar + CooldownBars)
+            {
+                Values[0][0] = 0;
+                return;
+            }
+
+            bool longSetup = IsLongSetup();
+            bool shortSetup = IsShortSetup();
+
+            if (longSetup)
+                RegisterSignal(true);
+            else if (shortSetup)
+                RegisterSignal(false);
+            else
+                Values[0][0] = 0;
+        }
+
+        private bool IsLongSetup()
+        {
+            bool c1 = Close[0] > ema14[0];
+            bool c2 = Volume[0] > volSma[0] * VolumeThreshold;
+            bool c3 = (ema14[0] - ema14[3]) / (3 * TickSize) > SlopeMin;
+            bool c4 = Math.Abs(Close[0] - Open[0]) > (High[0] - Low[0]) * BodyContextRatio;
+            int count = (c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0) + (c4 ? 1 : 0);
+            return count >= 3 && Close[0] > Open[0];
+        }
+
+        private bool IsShortSetup()
+        {
+            bool c1 = Close[0] < ema14[0];
+            bool c2 = Volume[0] > volSma[0] * VolumeThreshold;
+            bool c3 = (ema14[0] - ema14[3]) / (3 * TickSize) < -SlopeMin;
+            bool c4 = Math.Abs(Close[0] - Open[0]) > (High[0] - Low[0]) * BodyContextRatio;
+            int count = (c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0) + (c4 ? 1 : 0);
+            return count >= 3 && Close[0] < Open[0];
+        }
+
+        private void RegisterSignal(bool isLong)
+        {
+            double slope = Math.Abs(ema14[0] - ema14[3]) / (3 * TickSize);
+            double volRatio = Volume[0] / volSma[0];
+            double bodyRatio = (High[0] != Low[0]) ? Math.Abs(Close[0]-Open[0])/(High[0]-Low[0]) : 0;
+
+            // Use ATR bands in place of original blue/red bands from MagnoFlux
+            double mid = sma20[0];
+            double atr = atr14[0];
+            double upperBand = mid + atr;
+            double lowerBand = mid - atr;
+            double upperExtreme = mid + 2*atr;
+            double lowerExtreme = mid - 2*atr;
+            double space = isLong ? upperBand - Close[0] : Close[0] - lowerBand;
+            double macdHist = macd.Diff[0];
+            bool f5 = CurrentBar > 0
+                ? !(isLong && macd.Diff[0] < macd.Diff[1]) && !(!isLong && macd.Diff[0] > macd.Diff[1])
+                : true;
+            double extDist = isLong ? upperExtreme - Close[0] : Close[0] - lowerExtreme;
+
+            bool f1 = slope > SlopeMin;
+            bool f2 = Volume[0] > volSma[0] * VolumeThreshold;
+            bool f3 = bodyRatio > BodyContextRatio;
+            bool f4 = (space / TickSize) >= SignalPoints;
+            bool f6 = (extDist / TickSize) > SignalPoints * 0.5;
+
+            int score = (f1?1:0) + (f2?1:0) + (f3?1:0) + (f4?1:0) + (f5?1:0) + (f6?1:0);
+            Brush col = score >= 5 ? Brushes.Lime : score >= 3 ? Brushes.Gold : Brushes.Red;
+
+            if (isLong)
+            {
+                Draw.ArrowUp(this, "mdecLong_"+CurrentBar, true, 0, Low[0]-TickSize, col);
+                Draw.VerticalLine(this, "mdecLineL_"+CurrentBar, 0, col);
+            }
+            else
+            {
+                Draw.ArrowDown(this, "mdecShort_"+CurrentBar, true, 0, High[0]+TickSize, col);
+                Draw.VerticalLine(this, "mdecLineS_"+CurrentBar, 0, col);
+            }
+
+            Values[0][0] = score >= MinScoreToTrade ? 1 : 0;
+            lastSignalBar = CurrentBar;
+
+            double spaceTicks = space / TickSize;
+            double extTicks = extDist / TickSize;
+            string dir = isLong ? "LONG" : "SHORT";
+            Print($"{dir}={Time[0]:HH:mm:ss} Score={score} Slope={slope:F3} Vol={volRatio:F2} Body={bodyRatio:F2} Space={spaceTicks:F0} MACD={macdHist:F2} Ext={extTicks:F0}");
+            if (logW != null)
+            {
+                logW.WriteLine($"{Time[0]:yyyy-MM-dd HH:mm:ss},{dir},{Close[0]:0.00},{score},{slope:F3},{volRatio:F2},{bodyRatio:F2},{spaceTicks:F0},{macdHist:F2},{extTicks:F0}");
+                logW.Flush();
+            }
+        }
+    }
+}
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private MagnoDecisionScore_v1[] cacheMagnoDecisionScore_v1;
+		public MagnoDecisionScore_v1 MagnoDecisionScore_v1(int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade)
+		{
+			return MagnoDecisionScore_v1(Input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade);
+		}
+
+		public MagnoDecisionScore_v1 MagnoDecisionScore_v1(ISeries<double> input, int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade)
+		{
+			if (cacheMagnoDecisionScore_v1 != null)
+				for (int idx = 0; idx < cacheMagnoDecisionScore_v1.Length; idx++)
+					if (cacheMagnoDecisionScore_v1[idx] != null && cacheMagnoDecisionScore_v1[idx].CooldownBars == cooldownBars && cacheMagnoDecisionScore_v1[idx].SignalPoints == signalPoints && cacheMagnoDecisionScore_v1[idx].VolumeThreshold == volumeThreshold && cacheMagnoDecisionScore_v1[idx].SlopeMin == slopeMin && cacheMagnoDecisionScore_v1[idx].BodyContextRatio == bodyContextRatio && cacheMagnoDecisionScore_v1[idx].MinScoreToTrade == minScoreToTrade && cacheMagnoDecisionScore_v1[idx].EqualsInput(input))
+						return cacheMagnoDecisionScore_v1[idx];
+			return CacheIndicator<MagnoDecisionScore_v1>(new MagnoDecisionScore_v1(){ CooldownBars = cooldownBars, SignalPoints = signalPoints, VolumeThreshold = volumeThreshold, SlopeMin = slopeMin, BodyContextRatio = bodyContextRatio, MinScoreToTrade = minScoreToTrade }, input, ref cacheMagnoDecisionScore_v1);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.MagnoDecisionScore_v1 MagnoDecisionScore_v1(int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade)
+		{
+			return indicator.MagnoDecisionScore_v1(Input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade);
+		}
+
+		public Indicators.MagnoDecisionScore_v1 MagnoDecisionScore_v1(ISeries<double> input , int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade)
+		{
+			return indicator.MagnoDecisionScore_v1(input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.MagnoDecisionScore_v1 MagnoDecisionScore_v1(int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade)
+		{
+			return indicator.MagnoDecisionScore_v1(Input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade);
+		}
+
+		public Indicators.MagnoDecisionScore_v1 MagnoDecisionScore_v1(ISeries<double> input , int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade)
+		{
+			return indicator.MagnoDecisionScore_v1(input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade);
+		}
+	}
+}
+
+#endregion

@@ -1,0 +1,368 @@
+using System;
+using System.Globalization;
+using System.IO;
+using System.Windows.Media;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class AumentoV1_clean : Indicator
+    {
+        #region Parámetros
+        [NinjaScriptProperty] public int    CooldownBars       { get; set; } = 1;
+        [NinjaScriptProperty] public int    SignalPoints       { get; set; } = 40;
+        [NinjaScriptProperty] public double VolumeThreshold    { get; set; } = 1.5;
+        [NinjaScriptProperty] public double SlopeMin           { get; set; } = 0.035;
+        [NinjaScriptProperty] public double BodyContextRatio   { get; set; } = 0.40;
+        [NinjaScriptProperty] public int    MinScoreToTrade    { get; set; } = 5;
+
+        // Filtros operativos
+        [NinjaScriptProperty] public string AllowedStart       { get; set; } = "08:00";
+        [NinjaScriptProperty] public string AllowedEnd         { get; set; } = "16:30";
+        [NinjaScriptProperty] public double HertzMin           { get; set; } = 0.02;
+        [NinjaScriptProperty] public bool   UseTrendFilter     { get; set; } = true;
+        [NinjaScriptProperty] public int    TrendTFMinutes     { get; set; } = 3;
+
+        // Output
+        [NinjaScriptProperty] public int    HeartbeatBars      { get; set; } = 100;
+        #endregion
+
+        #region Indicadores
+        private EMA ema14;
+        private SMA volSma;
+        private SMA sma20;
+        private ATR atr14;
+        private MACD macd;
+        private EMA ema200Trend;      // en serie secundaria (minutos)
+        #endregion
+
+        #region Estado
+        private int lastSignalBar = -1000;
+        private int lastHeartbeat = 0;
+        private CultureInfo es = CultureInfo.GetCultureInfo("es-ES");
+
+        private int tot, win, loss;
+        private int pnlTicks;
+
+        private class SignalData
+        {
+            public int SignalBar;
+            public bool IsLong;
+            public double Entry;
+            public double TP, SL;
+            public bool InTrade;
+            public DateTime SignalTime;
+            public double SignalPrice;
+        }
+        private SignalData sig;
+        #endregion
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "AumentoV1_clean";
+                Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+                AddPlot(Brushes.Transparent, "Signal");
+            }
+            else if (State == State.Configure)
+            {
+                // Serie para filtro de tendencia
+                if (UseTrendFilter)
+                    AddDataSeries(BarsPeriodType.Minute, TrendTFMinutes);
+            }
+            else if (State == State.DataLoaded)
+            {
+                ema14      = EMA(14);
+                volSma     = SMA(Volume, 14);
+                sma20      = SMA(20);
+                atr14      = ATR(14);
+                macd       = MACD(12, 26, 9);
+                if (UseTrendFilter)
+                    ema200Trend = EMA(Closes[1], 200);
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            // Ignorar llamadas de la serie secundaria
+            if (BarsInProgress != 0)
+                return;
+
+            Values[0][0] = 0;
+
+            if (CurrentBar < 20 || (UseTrendFilter && Closes[1].Count < 200))
+                return;
+
+            // Filtro horario
+            var now = Time[0].TimeOfDay;
+            if (now < TimeSpan.Parse(AllowedStart) || now > TimeSpan.Parse(AllowedEnd))
+                return;
+
+            // Filtro de flujo (Hertz)
+            if (IsLowHertz(HertzMin))
+                return;
+
+            // Gestionar trade abierto (sin look-ahead)
+            ManageOpenTrade();
+            if (sig != null && sig.InTrade)
+            {
+                Heartbeat();
+                return;
+            }
+
+            // Cooldown
+            if (CurrentBar <= lastSignalBar + CooldownBars)
+            {
+                Heartbeat();
+                return;
+            }
+
+            // Setups
+            bool longSetup  = IsLongSetup();
+            bool shortSetup = IsShortSetup();
+
+            // Filtro tendencia
+            if (UseTrendFilter)
+            {
+                double ema200 = ema200Trend[0];
+                bool trendLong  = Closes[1][0] > ema200 && ema200 > ema200Trend[1];
+                bool trendShort = Closes[1][0] < ema200 && ema200 < ema200Trend[1];
+
+                if (longSetup && !trendLong)   longSetup  = false;
+                if (shortSetup && !trendShort) shortSetup = false;
+            }
+
+            bool picked = false;
+            bool isLong = false;
+
+            if (longSetup && !shortSetup) { picked = true; isLong = true; }
+            else if (shortSetup && !longSetup) { picked = true; isLong = false; }
+            else if (longSetup && shortSetup)
+            {
+                // desempate sencillo: a favor de pendiente de ema14
+                double slope = (ema14[0] - ema14[3]) / (3 * TickSize);
+                picked = true;
+                isLong = slope >= 0;
+            }
+
+            if (picked)
+            {
+                if (IsValidSignal(isLong))
+                {
+                    // Dibujo
+                    var brush = isLong ? Brushes.LimeGreen : Brushes.IndianRed;
+                    Draw.VerticalLine(this, "AumVL_" + CurrentBar, 0, brush);
+                    if (isLong)
+                        Draw.ArrowUp(this, "AumUp_" + CurrentBar, true, 0, Low[0] - TickSize, brush);
+                    else
+                        Draw.ArrowDown(this, "AumDn_" + CurrentBar, true, 0, High[0] + TickSize, brush);
+
+                    // Registrar señal (entrada será en la próxima barra)
+                    lastSignalBar = CurrentBar;
+                    sig = new SignalData
+                    {
+                        SignalBar   = CurrentBar,
+                        IsLong      = isLong,
+                        InTrade     = false,
+                        SignalTime  = Time[0],
+                        SignalPrice = Close[0]
+                    };
+                    Values[0][0] = 1;
+                }
+            }
+
+            Heartbeat();
+        }
+
+        #region Lógica de setups / scoring
+        private bool IsLongSetup()
+        {
+            bool c1 = Close[0] > ema14[0];
+            bool c2 = Volume[0] > volSma[0] * VolumeThreshold;
+            bool c3 = (ema14[0] - ema14[3]) / (3 * TickSize) > SlopeMin;
+            bool c4 = Math.Abs(Close[0] - Open[0]) > (High[0] - Low[0]) * BodyContextRatio;
+            int count = (c1?1:0) + (c2?1:0) + (c3?1:0) + (c4?1:0);
+            return count >= 3 && Close[0] > Open[0];
+        }
+
+        private bool IsShortSetup()
+        {
+            bool c1 = Close[0] < ema14[0];
+            bool c2 = Volume[0] > volSma[0] * VolumeThreshold;
+            bool c3 = (ema14[0] - ema14[3]) / (3 * TickSize) < -SlopeMin;
+            bool c4 = Math.Abs(Close[0] - Open[0]) > (High[0] - Low[0]) * BodyContextRatio;
+            int count = (c1?1:0) + (c2?1:0) + (c3?1:0) + (c4?1:0);
+            return count >= 3 && Close[0] < Open[0];
+        }
+
+        private bool IsValidSignal(bool isLong)
+        {
+            double slope     = Math.Abs(ema14[0] - ema14[3]) / (3 * TickSize);
+            double volRatio  = volSma[0] == 0 ? 0 : Volume[0] / volSma[0];
+            double bodyRatio = (High[0] != Low[0]) ? Math.Abs(Close[0] - Open[0]) / (High[0] - Low[0]) : 0;
+
+            double mid = sma20[0];
+            double atr = atr14[0];
+            double upperBand    = mid + atr;
+            double lowerBand    = mid - atr;
+            double upperExtreme = mid + 2 * atr;
+            double lowerExtreme = mid - 2 * atr;
+
+            double space   = isLong ? upperBand - Close[0] : Close[0] - lowerBand;
+            bool   f5      = CurrentBar > 0 ? !(isLong && macd.Diff[0] < macd.Diff[1]) && !(!isLong && macd.Diff[0] > macd.Diff[1]) : true;
+            double extDist = isLong ? upperExtreme - Close[0] : Close[0] - lowerExtreme;
+
+            bool f1 = slope > SlopeMin;
+            bool f2 = Volume[0] > volSma[0] * VolumeThreshold;
+            bool f3 = bodyRatio > BodyContextRatio;
+            bool f4 = (space / TickSize) >= SignalPoints;
+            bool f6 = (extDist / TickSize) > SignalPoints * 0.5;
+
+            int score = (f1?1:0) + (f2?1:0) + (f3?1:0) + (f4?1:0) + (f5?1:0) + (f6?1:0);
+            return score >= MinScoreToTrade;
+        }
+        #endregion
+
+        #region Gestión de trade (sin look-ahead)
+        private void ManageOpenTrade()
+        {
+            if (sig == null)
+                return;
+
+            // Entrada en la barra siguiente a la señal
+            if (!sig.InTrade && CurrentBar >= sig.SignalBar + 1)
+            {
+                sig.Entry = Open[0];
+                double r = SignalPoints * TickSize;
+                if (sig.IsLong)
+                {
+                    sig.TP = sig.Entry + r;
+                    sig.SL = sig.Entry - r;
+                }
+                else
+                {
+                    sig.TP = sig.Entry - r;
+                    sig.SL = sig.Entry + r;
+                }
+                sig.InTrade = true;
+
+                Print($"{(sig.IsLong ? "LONG" : "SHORT")}={sig.SignalTime:HH:mm:ss} - Señal {sig.SignalPrice.ToString("0.00", es)} Entrada={sig.Entry.ToString("0.00", es)} - TP={sig.TP.ToString("0.00", es)} - SL={sig.SL.ToString("0.00", es)} - Resultado=EN_CURSO");
+                return;
+            }
+
+            if (!sig.InTrade)
+                return;
+
+            bool hitTP = sig.IsLong ? High[0] >= sig.TP : Low[0] <= sig.TP;
+            bool hitSL = sig.IsLong ? Low[0] <= sig.SL : High[0] >= sig.SL;
+
+            if (hitTP || hitSL)
+            {
+                string res = hitTP ? "TP" : "SL";
+                double exitPrice = hitTP ? sig.TP : sig.SL;
+
+                tot++;
+                if (hitTP) win++; else loss++;
+
+                // PnL ticks (simétrico)
+                int ticks = (int)Math.Round(Math.Abs(exitPrice - sig.Entry) / TickSize);
+                pnlTicks += hitTP ? +ticks : -ticks;
+
+                Print($"{(sig.IsLong ? "LONG" : "SHORT")}={sig.SignalTime:HH:mm:ss} - Señal {sig.SignalPrice.ToString("0.00", es)} Entrada={sig.Entry.ToString("0.00", es)} - TP={sig.TP.ToString("0.00", es)} - SL={sig.SL.ToString("0.00", es)} - Resultado={res}");
+                PrintStat();
+
+                sig = null;
+            }
+        }
+        #endregion
+
+        #region Utilidades
+        private bool IsLowHertz(double minHz)
+        {
+            if (CurrentBar < 1) return true;
+            double secs = (Time[0] - Time[1]).TotalSeconds;
+            double hz = secs > 0 ? 1.0 / secs : 0.0;
+            return hz < minHz;
+        }
+
+        private void Heartbeat()
+        {
+            if (HeartbeatBars <= 0) return;
+            if (CurrentBar >= lastHeartbeat + HeartbeatBars)
+            {
+                PrintStat(prefix: $"HB {Time[0]:HH:mm:ss} | ");
+                lastHeartbeat = CurrentBar;
+            }
+        }
+
+        private void PrintStat(string prefix = "")
+        {
+            double wr = tot > 0 ? (double)win / tot * 100.0 : 0.0;
+            Print($"{prefix}Trades={tot} Win={win} Loss={loss} WinRate={wr:F1}% PnL={pnlTicks:+#;-#;0} ticks");
+        }
+        #endregion
+    }
+}
+
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private AumentoV1_clean[] cacheAumentoV1_clean;
+		public AumentoV1_clean AumentoV1_clean(int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade, string allowedStart, string allowedEnd, double hertzMin, bool useTrendFilter, int trendTFMinutes, int heartbeatBars)
+		{
+			return AumentoV1_clean(Input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade, allowedStart, allowedEnd, hertzMin, useTrendFilter, trendTFMinutes, heartbeatBars);
+		}
+
+		public AumentoV1_clean AumentoV1_clean(ISeries<double> input, int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade, string allowedStart, string allowedEnd, double hertzMin, bool useTrendFilter, int trendTFMinutes, int heartbeatBars)
+		{
+			if (cacheAumentoV1_clean != null)
+				for (int idx = 0; idx < cacheAumentoV1_clean.Length; idx++)
+					if (cacheAumentoV1_clean[idx] != null && cacheAumentoV1_clean[idx].CooldownBars == cooldownBars && cacheAumentoV1_clean[idx].SignalPoints == signalPoints && cacheAumentoV1_clean[idx].VolumeThreshold == volumeThreshold && cacheAumentoV1_clean[idx].SlopeMin == slopeMin && cacheAumentoV1_clean[idx].BodyContextRatio == bodyContextRatio && cacheAumentoV1_clean[idx].MinScoreToTrade == minScoreToTrade && cacheAumentoV1_clean[idx].AllowedStart == allowedStart && cacheAumentoV1_clean[idx].AllowedEnd == allowedEnd && cacheAumentoV1_clean[idx].HertzMin == hertzMin && cacheAumentoV1_clean[idx].UseTrendFilter == useTrendFilter && cacheAumentoV1_clean[idx].TrendTFMinutes == trendTFMinutes && cacheAumentoV1_clean[idx].HeartbeatBars == heartbeatBars && cacheAumentoV1_clean[idx].EqualsInput(input))
+						return cacheAumentoV1_clean[idx];
+			return CacheIndicator<AumentoV1_clean>(new AumentoV1_clean(){ CooldownBars = cooldownBars, SignalPoints = signalPoints, VolumeThreshold = volumeThreshold, SlopeMin = slopeMin, BodyContextRatio = bodyContextRatio, MinScoreToTrade = minScoreToTrade, AllowedStart = allowedStart, AllowedEnd = allowedEnd, HertzMin = hertzMin, UseTrendFilter = useTrendFilter, TrendTFMinutes = trendTFMinutes, HeartbeatBars = heartbeatBars }, input, ref cacheAumentoV1_clean);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.AumentoV1_clean AumentoV1_clean(int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade, string allowedStart, string allowedEnd, double hertzMin, bool useTrendFilter, int trendTFMinutes, int heartbeatBars)
+		{
+			return indicator.AumentoV1_clean(Input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade, allowedStart, allowedEnd, hertzMin, useTrendFilter, trendTFMinutes, heartbeatBars);
+		}
+
+		public Indicators.AumentoV1_clean AumentoV1_clean(ISeries<double> input , int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade, string allowedStart, string allowedEnd, double hertzMin, bool useTrendFilter, int trendTFMinutes, int heartbeatBars)
+		{
+			return indicator.AumentoV1_clean(input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade, allowedStart, allowedEnd, hertzMin, useTrendFilter, trendTFMinutes, heartbeatBars);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.AumentoV1_clean AumentoV1_clean(int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade, string allowedStart, string allowedEnd, double hertzMin, bool useTrendFilter, int trendTFMinutes, int heartbeatBars)
+		{
+			return indicator.AumentoV1_clean(Input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade, allowedStart, allowedEnd, hertzMin, useTrendFilter, trendTFMinutes, heartbeatBars);
+		}
+
+		public Indicators.AumentoV1_clean AumentoV1_clean(ISeries<double> input , int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade, string allowedStart, string allowedEnd, double hertzMin, bool useTrendFilter, int trendTFMinutes, int heartbeatBars)
+		{
+			return indicator.AumentoV1_clean(input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade, allowedStart, allowedEnd, hertzMin, useTrendFilter, trendTFMinutes, heartbeatBars);
+		}
+	}
+}
+
+#endregion

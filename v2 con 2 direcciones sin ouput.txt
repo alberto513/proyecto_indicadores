@@ -1,0 +1,543 @@
+using System;
+using System.IO;
+using System.Windows.Media;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+// MagnoDecisionScore_v2 - Integral update
+// Changelog:
+// 1. Weighted score with configurable weights
+// 2. Trend filter via EMA200 on secondary series
+// 3. Hertz filter and adaptive Renko size detection
+// 4. Time window and duplicate signal skip
+// 5. Partial TP, trailing stop and symmetric SL/TP
+// 6. Logging with additional metrics
+// 7. Customizable colors
+// 8. Output identical to MagnoFluxScalper_v6_Pro
+// 9. All parameters exposed for optimization
+// 10. Compatible with NT8.1+
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class MagnoDecisionScore_v2 : Indicator
+    {
+        #region Parameters
+        [NinjaScriptProperty]
+        [Display(Name="CooldownBars", Order=0, GroupName="Params")]
+        public int CooldownBars { get; set; } = 1;
+
+        [NinjaScriptProperty]
+        [Display(Name="SignalPoints", Order=1, GroupName="Params")]
+        public int SignalPoints { get; set; } = 40;
+
+        [NinjaScriptProperty]
+        [Display(Name="VolumeThreshold", Order=2, GroupName="Params")]
+        public double VolumeThreshold { get; set; } = 1.5;
+
+        [NinjaScriptProperty]
+        [Display(Name="SlopeMin", Order=3, GroupName="Params")]
+        public double SlopeMin { get; set; } = 0.035;
+
+        [NinjaScriptProperty]
+        [Display(Name="BodyContextRatio", Order=4, GroupName="Params")]
+        public double BodyContextRatio { get; set; } = 0.4;
+
+        [NinjaScriptProperty]
+        [Display(Name="MinScoreToTrade", Order=5, GroupName="Params")]
+        public int MinScoreToTrade { get; set; } = 6;
+
+        [NinjaScriptProperty]
+        [Display(Name="WeightSlope", Order=6, GroupName="Weights")]
+        public double WeightSlope { get; set; } = 1.0;
+
+        [NinjaScriptProperty]
+        [Display(Name="WeightVol", Order=7, GroupName="Weights")]
+        public double WeightVol { get; set; } = 2.0;
+
+        [NinjaScriptProperty]
+        [Display(Name="WeightBody", Order=8, GroupName="Weights")]
+        public double WeightBody { get; set; } = 1.0;
+
+        [NinjaScriptProperty]
+        [Display(Name="WeightSpace", Order=9, GroupName="Weights")]
+        public double WeightSpace { get; set; } = 1.0;
+
+        [NinjaScriptProperty]
+        [Display(Name="WeightMACD", Order=10, GroupName="Weights")]
+        public double WeightMACD { get; set; } = 1.0;
+
+        [NinjaScriptProperty]
+        [Display(Name="WeightExt", Order=11, GroupName="Weights")]
+        public double WeightExt { get; set; } = 1.0;
+
+        [NinjaScriptProperty]
+        [Display(Name="SpaceFactor", Order=12, GroupName="Params")]
+        public double SpaceFactor { get; set; } = 1.5;
+
+        [NinjaScriptProperty]
+        [Display(Name="TrendTFMinutes", Order=13, GroupName="Params")]
+        public int TrendTFMinutes { get; set; } = 3;
+
+        [NinjaScriptProperty]
+        [Display(Name="AllowedStart", Order=14, GroupName="Time")]
+        public string AllowedStart { get; set; } = "08:00";
+
+        [NinjaScriptProperty]
+        [Display(Name="AllowedEnd", Order=15, GroupName="Time")]
+        public string AllowedEnd { get; set; } = "16:30";
+
+        [NinjaScriptProperty]
+        [Display(Name="HertzMin", Order=16, GroupName="Params")]
+        public double HertzMin { get; set; } = 0.02;
+
+        [NinjaScriptProperty]
+        [Display(Name="PartialTakePercent", Order=17, GroupName="Trade")]
+        public double PartialTakePercent { get; set; } = 0.5;
+
+        [NinjaScriptProperty]
+        [Display(Name="TP1Ratio", Order=18, GroupName="Trade")]
+        public double TP1Ratio { get; set; } = 0.6;
+
+        [NinjaScriptProperty]
+        [Display(Name="TPFullRatio", Order=19, GroupName="Trade")]
+        public double TPFullRatio { get; set; } = 1.0;
+
+        [NinjaScriptProperty]
+        [Display(Name="ColorWin", Order=20, GroupName="Colors")]
+        public System.Windows.Media.Color ColorWin { get; set; } = Colors.SteelBlue;
+
+        [NinjaScriptProperty]
+        [Display(Name="ColorLoss", Order=21, GroupName="Colors")]
+        public System.Windows.Media.Color ColorLoss { get; set; } = Colors.DarkGray;
+
+        [NinjaScriptProperty]
+        [Display(Name="ColorNeutral", Order=22, GroupName="Colors")]
+        public System.Windows.Media.Color ColorNeutral { get; set; } = Colors.Gold;
+
+        [NinjaScriptProperty]
+        [Display(Name="RenkoSizeHighVol", Order=23, GroupName="Renko")]
+        public int RenkoSizeHighVol { get; set; } = 5;
+
+        [NinjaScriptProperty]
+        [Display(Name="RenkoSizeLowVol", Order=24, GroupName="Renko")]
+        public int RenkoSizeLowVol { get; set; } = 3;
+
+        [NinjaScriptProperty]
+        [Display(Name="ATRVolThreshold", Order=25, GroupName="Renko")]
+        public double ATRVolThreshold { get; set; } = 2.0;
+
+        [NinjaScriptProperty]
+        [Display(Name="SkipBarsSameDir", Order=26, GroupName="Params")]
+        public int SkipBarsSameDir { get; set; } = 2;
+
+        [NinjaScriptProperty]
+        [Display(Name="HeartbeatBars", Order=27, GroupName="Output")]
+        public int HeartbeatBars { get; set; } = 100;  // >>> OUTPUT ADDED
+        #endregion
+
+        private EMA ema14;
+        private SMA volSma;
+        private SMA sma20;
+        private ATR atr14;
+        private MACD macd;
+        private EMA emaTrend;
+
+        private int lastSignalBar = -1000;
+        private bool lastSignalLong = true;
+
+        private StreamWriter logW;
+        private int totalTrades;
+        private int winTrades;
+        private int lossTrades;
+        private int lastHeartbeatBar;               // >>> OUTPUT ADDED
+        private int pnlTicks;                       // neto en ticks  >>> OUTPUT ADDED
+
+        private class SignalData
+        {
+            public DateTime SignalTime;
+            public double SignalPrice;
+            public double EntryPrice;
+            public double TP1;
+            public double TP;
+            public double SL;
+            public bool IsLong;
+            public bool InTrade;
+            public bool PartialTaken;
+            public double Score;
+            public double Slope;
+            public double VolRatio;
+            public double BodyRatio;
+            public double SpaceTicks;
+            public double MacdHist;
+            public double ExtTicks;
+            public double Hz;
+            public bool ClosedPrinted;
+        }
+
+        private SignalData signal;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "MagnoDecisionScore_v2";
+                Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+                AddPlot(Brushes.Transparent, "DecisionPlot");
+            }
+            else if (State == State.Configure)
+            {
+                AddDataSeries(BarsPeriodType.Minute, TrendTFMinutes);
+            }
+            else if (State == State.DataLoaded)
+            {
+                ema14 = EMA(14);
+                volSma = SMA(Volume, 14);
+                sma20 = SMA(20);
+                atr14 = ATR(14);
+                macd = MACD(12, 26, 9);
+                emaTrend = EMA(Closes[1], 200);
+
+                string path = System.IO.Path.Combine(NinjaTrader.Core.Globals.UserDataDir, "MagnoDecisionScore_v2_log.csv");
+                bool newFile = !File.Exists(path);
+                try
+                {
+                    logW = new StreamWriter(path, true);
+                    if (newFile)
+                        logW.WriteLine("Time,Dir,Entry,Exit,Result,Score,Tot,Win,Loss,WinRate");
+                }
+                catch (Exception)
+                {
+                    logW = null;
+                }
+                totalTrades = winTrades = lossTrades = 0;
+            }
+            else if (State == State.Terminated)
+            {
+                if (logW != null)
+                {
+                    logW.Flush();
+                    logW.Close();
+                    logW = null;
+                }
+                // >>> OUTPUT ADDED: Resumen final
+                double finalWr = totalTrades > 0 ? (double)winTrades / totalTrades * 100.0 : 0.0;
+                Print($"RESUMEN FINAL | Trades={totalTrades} Win={winTrades} Loss={lossTrades} WinRate={finalWr:F1}% PnL={pnlTicks:+#;-#;0} ticks");
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (BarsInProgress != 0)
+                return;
+
+            if (CurrentBar < 20 || Closes[1].Count < 200)
+                return;
+
+            TimeSpan now = Time[0].TimeOfDay;
+            if (now < TimeSpan.Parse(AllowedStart) || now > TimeSpan.Parse(AllowedEnd))
+            {
+                Values[0][0] = 0;
+                return;
+            }
+
+            double hz = signal != null ? signal.Hz : CalculateHz();
+            if (hz < HertzMin)
+            {
+                Values[0][0] = 0;
+                return;
+            }
+
+            // Adaptive Renko size (inform only)
+            int newSize = atr14[0] > ATRVolThreshold * TickSize ? RenkoSizeHighVol : RenkoSizeLowVol;
+            if (BarsPeriod.BarsPeriodType == BarsPeriodType.Renko && BarsPeriod.Value != newSize)
+                Print($"Renko size suggested: {newSize} (manual reload required)");
+
+            ManageOpenTrade();
+            if (signal != null && signal.InTrade)
+                return;
+
+            if (CurrentBar <= lastSignalBar + CooldownBars)
+            {
+                Values[0][0] = 0;
+                return;
+            }
+
+            bool longSetup = IsLongSetup();
+            bool shortSetup = IsShortSetup();
+
+            if (longSetup && !shortSetup)
+                RegisterSignal(true, hz);
+            else if (shortSetup && !longSetup)
+                RegisterSignal(false, hz);
+            else
+                Values[0][0] = 0;
+
+            // >>> OUTPUT ADDED: Heartbeat cada HeartbeatBars
+            if (CurrentBar >= lastHeartbeatBar + HeartbeatBars)
+            {
+                double wr = totalTrades > 0 ? (double)winTrades / totalTrades * 100.0 : 0.0;
+                Print($"HB {Time[0]:HH:mm:ss} | Trades={totalTrades} Win={winTrades} Loss={lossTrades} WinRate={wr:F1}% PnL={pnlTicks:+#;-#;0} ticks");
+                lastHeartbeatBar = CurrentBar;
+            }
+        }
+
+        private bool IsLongSetup()
+        {
+            double ema200 = emaTrend[0];
+            bool trendLong = Closes[1][0] > ema200 && ema200 > emaTrend[1];
+            if (!trendLong)
+                return false;
+
+            bool c1 = Close[0] > ema14[0];
+            bool c2 = Volume[0] > volSma[0] * VolumeThreshold;
+            bool c3 = (ema14[0] - ema14[3]) / (3 * TickSize) > SlopeMin;
+            bool c4 = Math.Abs(Close[0] - Open[0]) > (High[0] - Low[0]) * BodyContextRatio;
+            int count = (c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0) + (c4 ? 1 : 0);
+            return count >= 3 && Close[0] > Open[0];
+        }
+
+        private bool IsShortSetup()
+        {
+            double ema200 = emaTrend[0];
+            bool trendShort = Closes[1][0] < ema200 && ema200 < emaTrend[1];
+            if (!trendShort)
+                return false;
+
+            bool c1 = Close[0] < ema14[0];
+            bool c2 = Volume[0] > volSma[0] * VolumeThreshold;
+            bool c3 = (ema14[0] - ema14[3]) / (3 * TickSize) < -SlopeMin;
+            bool c4 = Math.Abs(Close[0] - Open[0]) > (High[0] - Low[0]) * BodyContextRatio;
+            int count = (c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0) + (c4 ? 1 : 0);
+            return count >= 3 && Close[0] < Open[0];
+        }
+
+        private void RegisterSignal(bool isLong, double hz)
+        {
+            if (CurrentBar <= lastSignalBar + SkipBarsSameDir && isLong == lastSignalLong)
+                return;
+
+            double slope = Math.Abs(ema14[0] - ema14[3]) / (3 * TickSize);
+            double volRatio = volSma[0] == 0 ? 0 : Volume[0] / volSma[0];
+            double bodyRatio = (High[0] != Low[0]) ? Math.Abs(Close[0]-Open[0])/(High[0]-Low[0]) : 0;
+
+            double mid = sma20[0];
+            double atr = atr14[0];
+            double upperBand = mid + atr;
+            double lowerBand = mid - atr;
+            double upperExtreme = mid + 2*atr;
+            double lowerExtreme = mid - 2*atr;
+            double space = isLong ? upperBand - Close[0] : Close[0] - lowerBand;
+            double macdHist = macd.Diff[0];
+            bool f5 = CurrentBar > 0
+                ? !(isLong && macd.Diff[0] < macd.Diff[1]) && !(!isLong && macd.Diff[0] > macd.Diff[1])
+                : true;
+            double extDist = isLong ? upperExtreme - Close[0] : Close[0] - lowerExtreme;
+
+            bool f1 = slope > SlopeMin;
+            bool f2 = Volume[0] > volSma[0] * VolumeThreshold;
+            bool f3 = bodyRatio > BodyContextRatio;
+            bool f4 = space >= SpaceFactor * SignalPoints * TickSize;
+            bool f6 = (extDist / TickSize) > SignalPoints * 0.5;
+
+            double score = (f1 ? WeightSlope : 0) +
+                           (f2 ? WeightVol : 0) +
+                           (f3 ? WeightBody : 0) +
+                           (f4 ? WeightSpace : 0) +
+                           (f5 ? WeightMACD : 0) +
+                           (f6 ? WeightExt : 0);
+
+            if (Volume[0] > volSma[0]*2 && bodyRatio < 0.3)
+                score -= WeightVol;
+
+            Brush col = new SolidColorBrush(isLong ? ColorWin : ColorLoss);
+            if (isLong)
+                Draw.ArrowUp(this, "md2_" + CurrentBar, true, 0, Low[0] - TickSize, col);
+            else
+                Draw.ArrowDown(this, "md2_" + CurrentBar, true, 0, High[0] + TickSize, col);
+            Draw.VerticalLine(this, "md2_v_" + CurrentBar, 0, col);
+
+            Values[0][0] = score >= MinScoreToTrade ? 1 : 0;
+            lastSignalBar = CurrentBar;
+            lastSignalLong = isLong;
+
+            signal = new SignalData {
+                SignalTime = Time[0],
+                SignalPrice = Close[0],
+                IsLong = isLong,
+                InTrade = false,
+                PartialTaken = false,
+                ClosedPrinted = false,
+                Score = score,
+                Slope = slope,
+                VolRatio = volRatio,
+                BodyRatio = bodyRatio,
+                SpaceTicks = space / TickSize,
+                MacdHist = macdHist,
+                ExtTicks = extDist / TickSize,
+                Hz = hz
+            };
+        }
+
+        private void ManageOpenTrade()
+        {
+            if (signal == null)
+                return;
+
+            if (!signal.InTrade)
+            {
+                if (CurrentBar >= lastSignalBar + 1)
+                {
+                    signal.EntryPrice = Open[0];
+                    double r = SignalPoints * TickSize;
+                    if (signal.IsLong)
+                    {
+                        signal.TP = signal.EntryPrice + TPFullRatio * r;
+                        signal.TP1 = signal.EntryPrice + TP1Ratio * r;
+                        signal.SL = signal.EntryPrice - r;
+                    }
+                    else
+                    {
+                        signal.TP = signal.EntryPrice - TPFullRatio * r;
+                        signal.TP1 = signal.EntryPrice - TP1Ratio * r;
+                        signal.SL = signal.EntryPrice + r;
+                    }
+                    signal.InTrade = true;
+                }
+                return;
+            }
+
+            bool hitTP = signal.IsLong ? High[0] >= signal.TP : Low[0] <= signal.TP;
+            bool hitSL = signal.IsLong ? Low[0] <= signal.SL : High[0] >= signal.SL;
+            bool hitTP1 = signal.IsLong ? High[0] >= signal.TP1 : Low[0] <= signal.TP1;
+
+            if (!signal.PartialTaken && hitTP1)
+            {
+                signal.PartialTaken = true;
+                signal.SL = signal.EntryPrice;
+            }
+
+            double moveThresh = TPFullRatio * SignalPoints * TickSize * 0.8;
+            if (signal.IsLong && High[0] - signal.EntryPrice >= moveThresh)
+                signal.SL = Math.Max(signal.SL, Close[0] - atr14[0]);
+            if (!signal.IsLong && signal.EntryPrice - Low[0] >= moveThresh)
+                signal.SL = Math.Min(signal.SL, Close[0] + atr14[0]);
+
+            if (hitTP || hitSL)
+            {
+                if (!signal.ClosedPrinted)
+                {
+                    string res = hitTP ? "TP" : "SL";
+                    string dir = signal.IsLong ? "LONG" : "SHORT";
+                    double entry = RoundToTick(signal.EntryPrice);
+                    double sigPrice = RoundToTick(signal.SignalPrice);
+                    double tp = RoundToTick(signal.TP);
+                    double sl = RoundToTick(signal.SL);
+                    double exitPrice = RoundToTick(hitTP ? signal.TP : signal.SL);
+
+                    totalTrades++;
+                    if (hitTP)
+                        winTrades++;
+                    else
+                        lossTrades++;
+                    double winRate = totalTrades > 0 ? (double)winTrades / totalTrades * 100.0 : 0.0;
+
+                    // >>> OUTPUT ADDED: acumular PnL en ticks
+                    int ticks = (int)Math.Round((exitPrice - entry) / TickSize * (hitTP ? 1 : -1));
+                    pnlTicks += ticks;
+
+                    if (State == State.Realtime)
+                    {
+                        Print($"{dir}={signal.SignalTime:HH:mm:ss} - Señal {sigPrice:0.00} Entrada={entry:0.00} - TP={tp:0.00} - SL={sl:0.00} - Resultado={res}");
+                        Print($"STAT Tot={totalTrades} Win={winTrades} Loss={lossTrades} WinRate={winRate:F1}%");
+                    }
+
+                    if (logW != null)
+                    {
+                        logW.WriteLine($"{Time[0]:yyyy-MM-dd HH:mm:ss},{dir},{entry:0.00},{exitPrice:0.00},{res},{signal.Score:F2},{totalTrades},{winTrades},{lossTrades},{winRate:F1}");
+                        logW.Flush();
+                    }
+
+                    signal.ClosedPrinted = true;
+                }
+                signal = null;
+            }
+        }
+
+        private double CalculateHz()
+        {
+            if (CurrentBar < 1)
+                return 0;
+            double secs = (Time[0] - Time[1]).TotalSeconds;
+            return secs > 0 ? 1.0 / secs : 0;
+        }
+
+        #region Helpers
+        private double RoundToTick(double price)
+        {
+            return Math.Round(price / TickSize) * TickSize;
+        }
+        #endregion
+    }
+}
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private MagnoDecisionScore_v2[] cacheMagnoDecisionScore_v2;
+		public MagnoDecisionScore_v2 MagnoDecisionScore_v2(int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade, double weightSlope, double weightVol, double weightBody, double weightSpace, double weightMACD, double weightExt, double spaceFactor, int trendTFMinutes, string allowedStart, string allowedEnd, double hertzMin, double partialTakePercent, double tP1Ratio, double tPFullRatio, System.Windows.Media.Color colorWin, System.Windows.Media.Color colorLoss, System.Windows.Media.Color colorNeutral, int renkoSizeHighVol, int renkoSizeLowVol, double aTRVolThreshold, int skipBarsSameDir, int heartbeatBars)
+		{
+			return MagnoDecisionScore_v2(Input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade, weightSlope, weightVol, weightBody, weightSpace, weightMACD, weightExt, spaceFactor, trendTFMinutes, allowedStart, allowedEnd, hertzMin, partialTakePercent, tP1Ratio, tPFullRatio, colorWin, colorLoss, colorNeutral, renkoSizeHighVol, renkoSizeLowVol, aTRVolThreshold, skipBarsSameDir, heartbeatBars);
+		}
+
+		public MagnoDecisionScore_v2 MagnoDecisionScore_v2(ISeries<double> input, int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade, double weightSlope, double weightVol, double weightBody, double weightSpace, double weightMACD, double weightExt, double spaceFactor, int trendTFMinutes, string allowedStart, string allowedEnd, double hertzMin, double partialTakePercent, double tP1Ratio, double tPFullRatio, System.Windows.Media.Color colorWin, System.Windows.Media.Color colorLoss, System.Windows.Media.Color colorNeutral, int renkoSizeHighVol, int renkoSizeLowVol, double aTRVolThreshold, int skipBarsSameDir, int heartbeatBars)
+		{
+			if (cacheMagnoDecisionScore_v2 != null)
+				for (int idx = 0; idx < cacheMagnoDecisionScore_v2.Length; idx++)
+					if (cacheMagnoDecisionScore_v2[idx] != null && cacheMagnoDecisionScore_v2[idx].CooldownBars == cooldownBars && cacheMagnoDecisionScore_v2[idx].SignalPoints == signalPoints && cacheMagnoDecisionScore_v2[idx].VolumeThreshold == volumeThreshold && cacheMagnoDecisionScore_v2[idx].SlopeMin == slopeMin && cacheMagnoDecisionScore_v2[idx].BodyContextRatio == bodyContextRatio && cacheMagnoDecisionScore_v2[idx].MinScoreToTrade == minScoreToTrade && cacheMagnoDecisionScore_v2[idx].WeightSlope == weightSlope && cacheMagnoDecisionScore_v2[idx].WeightVol == weightVol && cacheMagnoDecisionScore_v2[idx].WeightBody == weightBody && cacheMagnoDecisionScore_v2[idx].WeightSpace == weightSpace && cacheMagnoDecisionScore_v2[idx].WeightMACD == weightMACD && cacheMagnoDecisionScore_v2[idx].WeightExt == weightExt && cacheMagnoDecisionScore_v2[idx].SpaceFactor == spaceFactor && cacheMagnoDecisionScore_v2[idx].TrendTFMinutes == trendTFMinutes && cacheMagnoDecisionScore_v2[idx].AllowedStart == allowedStart && cacheMagnoDecisionScore_v2[idx].AllowedEnd == allowedEnd && cacheMagnoDecisionScore_v2[idx].HertzMin == hertzMin && cacheMagnoDecisionScore_v2[idx].PartialTakePercent == partialTakePercent && cacheMagnoDecisionScore_v2[idx].TP1Ratio == tP1Ratio && cacheMagnoDecisionScore_v2[idx].TPFullRatio == tPFullRatio && cacheMagnoDecisionScore_v2[idx].ColorWin == colorWin && cacheMagnoDecisionScore_v2[idx].ColorLoss == colorLoss && cacheMagnoDecisionScore_v2[idx].ColorNeutral == colorNeutral && cacheMagnoDecisionScore_v2[idx].RenkoSizeHighVol == renkoSizeHighVol && cacheMagnoDecisionScore_v2[idx].RenkoSizeLowVol == renkoSizeLowVol && cacheMagnoDecisionScore_v2[idx].ATRVolThreshold == aTRVolThreshold && cacheMagnoDecisionScore_v2[idx].SkipBarsSameDir == skipBarsSameDir && cacheMagnoDecisionScore_v2[idx].HeartbeatBars == heartbeatBars && cacheMagnoDecisionScore_v2[idx].EqualsInput(input))
+						return cacheMagnoDecisionScore_v2[idx];
+			return CacheIndicator<MagnoDecisionScore_v2>(new MagnoDecisionScore_v2(){ CooldownBars = cooldownBars, SignalPoints = signalPoints, VolumeThreshold = volumeThreshold, SlopeMin = slopeMin, BodyContextRatio = bodyContextRatio, MinScoreToTrade = minScoreToTrade, WeightSlope = weightSlope, WeightVol = weightVol, WeightBody = weightBody, WeightSpace = weightSpace, WeightMACD = weightMACD, WeightExt = weightExt, SpaceFactor = spaceFactor, TrendTFMinutes = trendTFMinutes, AllowedStart = allowedStart, AllowedEnd = allowedEnd, HertzMin = hertzMin, PartialTakePercent = partialTakePercent, TP1Ratio = tP1Ratio, TPFullRatio = tPFullRatio, ColorWin = colorWin, ColorLoss = colorLoss, ColorNeutral = colorNeutral, RenkoSizeHighVol = renkoSizeHighVol, RenkoSizeLowVol = renkoSizeLowVol, ATRVolThreshold = aTRVolThreshold, SkipBarsSameDir = skipBarsSameDir, HeartbeatBars = heartbeatBars }, input, ref cacheMagnoDecisionScore_v2);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.MagnoDecisionScore_v2 MagnoDecisionScore_v2(int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade, double weightSlope, double weightVol, double weightBody, double weightSpace, double weightMACD, double weightExt, double spaceFactor, int trendTFMinutes, string allowedStart, string allowedEnd, double hertzMin, double partialTakePercent, double tP1Ratio, double tPFullRatio, System.Windows.Media.Color colorWin, System.Windows.Media.Color colorLoss, System.Windows.Media.Color colorNeutral, int renkoSizeHighVol, int renkoSizeLowVol, double aTRVolThreshold, int skipBarsSameDir, int heartbeatBars)
+		{
+			return indicator.MagnoDecisionScore_v2(Input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade, weightSlope, weightVol, weightBody, weightSpace, weightMACD, weightExt, spaceFactor, trendTFMinutes, allowedStart, allowedEnd, hertzMin, partialTakePercent, tP1Ratio, tPFullRatio, colorWin, colorLoss, colorNeutral, renkoSizeHighVol, renkoSizeLowVol, aTRVolThreshold, skipBarsSameDir, heartbeatBars);
+		}
+
+		public Indicators.MagnoDecisionScore_v2 MagnoDecisionScore_v2(ISeries<double> input , int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade, double weightSlope, double weightVol, double weightBody, double weightSpace, double weightMACD, double weightExt, double spaceFactor, int trendTFMinutes, string allowedStart, string allowedEnd, double hertzMin, double partialTakePercent, double tP1Ratio, double tPFullRatio, System.Windows.Media.Color colorWin, System.Windows.Media.Color colorLoss, System.Windows.Media.Color colorNeutral, int renkoSizeHighVol, int renkoSizeLowVol, double aTRVolThreshold, int skipBarsSameDir, int heartbeatBars)
+		{
+			return indicator.MagnoDecisionScore_v2(input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade, weightSlope, weightVol, weightBody, weightSpace, weightMACD, weightExt, spaceFactor, trendTFMinutes, allowedStart, allowedEnd, hertzMin, partialTakePercent, tP1Ratio, tPFullRatio, colorWin, colorLoss, colorNeutral, renkoSizeHighVol, renkoSizeLowVol, aTRVolThreshold, skipBarsSameDir, heartbeatBars);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.MagnoDecisionScore_v2 MagnoDecisionScore_v2(int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade, double weightSlope, double weightVol, double weightBody, double weightSpace, double weightMACD, double weightExt, double spaceFactor, int trendTFMinutes, string allowedStart, string allowedEnd, double hertzMin, double partialTakePercent, double tP1Ratio, double tPFullRatio, System.Windows.Media.Color colorWin, System.Windows.Media.Color colorLoss, System.Windows.Media.Color colorNeutral, int renkoSizeHighVol, int renkoSizeLowVol, double aTRVolThreshold, int skipBarsSameDir, int heartbeatBars)
+		{
+			return indicator.MagnoDecisionScore_v2(Input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade, weightSlope, weightVol, weightBody, weightSpace, weightMACD, weightExt, spaceFactor, trendTFMinutes, allowedStart, allowedEnd, hertzMin, partialTakePercent, tP1Ratio, tPFullRatio, colorWin, colorLoss, colorNeutral, renkoSizeHighVol, renkoSizeLowVol, aTRVolThreshold, skipBarsSameDir, heartbeatBars);
+		}
+
+		public Indicators.MagnoDecisionScore_v2 MagnoDecisionScore_v2(ISeries<double> input , int cooldownBars, int signalPoints, double volumeThreshold, double slopeMin, double bodyContextRatio, int minScoreToTrade, double weightSlope, double weightVol, double weightBody, double weightSpace, double weightMACD, double weightExt, double spaceFactor, int trendTFMinutes, string allowedStart, string allowedEnd, double hertzMin, double partialTakePercent, double tP1Ratio, double tPFullRatio, System.Windows.Media.Color colorWin, System.Windows.Media.Color colorLoss, System.Windows.Media.Color colorNeutral, int renkoSizeHighVol, int renkoSizeLowVol, double aTRVolThreshold, int skipBarsSameDir, int heartbeatBars)
+		{
+			return indicator.MagnoDecisionScore_v2(input, cooldownBars, signalPoints, volumeThreshold, slopeMin, bodyContextRatio, minScoreToTrade, weightSlope, weightVol, weightBody, weightSpace, weightMACD, weightExt, spaceFactor, trendTFMinutes, allowedStart, allowedEnd, hertzMin, partialTakePercent, tP1Ratio, tPFullRatio, colorWin, colorLoss, colorNeutral, renkoSizeHighVol, renkoSizeLowVol, aTRVolThreshold, skipBarsSameDir, heartbeatBars);
+		}
+	}
+}
+
+#endregion
