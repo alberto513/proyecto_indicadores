@@ -1,7 +1,0 @@
-Instrumento;Acción;Cantidad;Precio;Tiempo;ID;E/X;Posición;ID de orden;Nombre;Comisión;Tarifa;Nombre de cuenta de pantalla;Conexión;
-NQ 09-25;Vender;1;22980,00;03/07/2025 10:35:47;36e56dd07aef47d2b8c9a8d7775bd696;Salida;-;6655dce47d854a18a79029c7883db447;SL;0,00 $;1;Playback101;Reproducción;
-NQ 09-25;Comprar;1;22964,25;03/07/2025 10:33:34;141476b4df1645519c897ec583f1dbc6;Entrada;1 L;813026a2b6ef47c8b33af5cfeed2c297;LongEntry;0,00 $;1;Playback101;Reproducción;
-NQ 09-25;Vender;1;22964,75;03/07/2025 10:30:35;89e5a6ba70044676aa79f44863f4fe31;Salida;-;c255b49e9621428c8f7e3ce2c4980b20;SL;0,00 $;1;Playback101;Reproducción;
-NQ 09-25;Comprar;1;22955,75;03/07/2025 10:30:18;91295b59c20d424295bc9b4cf815de7d;Entrada;1 L;46a48ef479d648ae9ba86b143c751b40;LongEntry;0,00 $;1;Playback101;Reproducción;
-NQ 09-25;Vender;1;22949,00;03/07/2025 10:30:12;19f15ebdef97446b8436d1ec670fa9c4;Salida;-;0fea2d1dd20e420ba2456b399f87355d;SL;0,00 $;1;Playback101;Reproducción;
-NQ 09-25;Comprar;1;22942,50;03/07/2025 10:30:02;3207849082154b6baebfdd853edd2e92;Entrada;1 L;6ac4b19eb69b46df84502ad7597aa033;LongEntry;0,00 $;1;Playback101;Reproducción;
